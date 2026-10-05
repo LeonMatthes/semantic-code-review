@@ -48,7 +48,7 @@ def test_language_for_path_python() -> None:
 
 
 def test_language_for_path_unsupported_is_none() -> None:
-    assert language_for_path("main.rs") is None
+    assert language_for_path("main.go") is None
     assert language_for_path("README") is None
 
 
@@ -98,7 +98,7 @@ def test_ranges_are_one_indexed() -> None:
 
 
 def test_unsupported_language_returns_empty() -> None:
-    assert outline_symbols("fn main() {}", "rust") == []
+    assert outline_symbols("package main", "go") == []
 
 
 def test_syntax_error_does_not_raise() -> None:

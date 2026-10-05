@@ -46,10 +46,34 @@ HTTP server with a back-channel:
   guessing — and the model no longer restates it, which is what its
   `symbols_*` fields were (ADR 0001, amended).
 
-Grammars ship as three individual packages — `tree-sitter-python`,
-`tree-sitter-javascript`, `tree-sitter-typescript`. Other languages
-degrade to the indent-based fold fallback: the floor is unchanged, the
-ceiling rises only for what we ship.
+Grammars ship as four individual packages — `tree-sitter-python`,
+`tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-rust`.
+Other languages degrade to the indent-based fold fallback: the floor is
+unchanged, the ceiling rises only for what we ship.
+
+### Rust
+
+`.rs` files use `tree-sitter-rust==0.24.2` with a curated tag query in
+`structural/parse.py`. Definitions cover functions (including methods and
+bodyless declarations), structs, enums, unions, traits, type aliases,
+associated types, constants, statics, modules, and `macro_rules!` macros.
+Each source definition is captured once. Fields, variants, parameters,
+local bindings, and imports are not separate symbols.
+
+Signatures retain declared headers, modifiers, generics, lifetimes, and
+`where` clauses, excluding bodies and constant/static initializers. Tuple
+structs retain their fields; type aliases retain their target; macro
+signatures stop at the name. Reference queries cover direct, qualified,
+method, generic, and macro calls, plus implementation-header trait/type
+names. References remain name-based. Macros are not expanded and
+conditional compilation is not evaluated.
+
+Nesting follows captured source containment: modules and traits contain
+their declarations. `impl` blocks are not symbols, so their methods and
+associated items appear under the nearest captured enclosing definition,
+or at the root; they are not attached to a separately declared struct.
+Repeated names can collide in the change detector's qualified-name map.
+The follow-up is [Rust symbol identity across impl blocks](PARKED_IDEAS.md#rust-symbol-identity-across-impl-blocks).
 
 ## Not yet built
 

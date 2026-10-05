@@ -84,6 +84,38 @@ def _tsx_support() -> tuple[Language, str]:
     return Language(tst.language_tsx()), _typescript_tags()
 
 
+_RUST_TAGS = """
+(function_item name: (identifier) @name) @definition.function
+(function_signature_item name: (identifier) @name) @definition.function
+(struct_item name: (type_identifier) @name) @definition.struct
+(enum_item name: (type_identifier) @name) @definition.enum
+(union_item name: (type_identifier) @name) @definition.union
+(trait_item name: (type_identifier) @name) @definition.trait
+(type_item name: (type_identifier) @name) @definition.type
+(associated_type name: (type_identifier) @name) @definition.type
+(const_item name: (identifier) @name) @definition.constant
+(static_item name: (identifier) @name) @definition.static
+(mod_item name: (identifier) @name) @definition.module
+(macro_definition name: (identifier) @name) @definition.macro
+
+(call_expression function: [(identifier) (scoped_identifier)] @reference.call)
+(call_expression function: (field_expression field: (field_identifier) @reference.call))
+(call_expression function: (generic_function
+    function: [(identifier) (scoped_identifier)] @reference.call))
+(call_expression function: (generic_function
+    function: (field_expression field: (field_identifier) @reference.call)))
+(macro_invocation macro: [(identifier) (scoped_identifier)] @reference.call)
+(impl_item trait: (_) @reference.implementation)
+(impl_item type: (_) @reference.implementation)
+"""
+
+
+def _rust_support() -> tuple[Language, str]:
+    import tree_sitter_rust
+
+    return Language(tree_sitter_rust.language()), _RUST_TAGS
+
+
 _REGISTRY: dict[str, _LangSupport] = {
     "python": _LangSupport(extensions=(".py",), loader=_python_support),
     "javascript": _LangSupport(extensions=(".js", ".jsx", ".mjs", ".cjs"), loader=_javascript_support),
@@ -91,6 +123,7 @@ _REGISTRY: dict[str, _LangSupport] = {
     # means the tsx grammar mis-parses plain TS and vice versa.
     "typescript": _LangSupport(extensions=(".ts", ".mts", ".cts"), loader=_typescript_support),
     "tsx": _LangSupport(extensions=(".tsx",), loader=_tsx_support),
+    "rust": _LangSupport(extensions=(".rs",), loader=_rust_support),
 }
 
 _EXT_TO_LANG: dict[str, str] = {ext: name for name, spec in _REGISTRY.items() for ext in spec.extensions}
@@ -299,12 +332,31 @@ def _ts_signature(node: Node, source: bytes) -> str | None:
     return _collapse_ws(header) or None
 
 
+def _rust_signature(node: Node, source: bytes) -> str | None:
+    end = node.end_byte
+    if node.type == "macro_definition":
+        name = node.child_by_field_name("name")
+        if name is not None:
+            end = name.end_byte
+    elif node.type in ("const_item", "static_item"):
+        declared_type = node.child_by_field_name("type")
+        if declared_type is not None:
+            end = declared_type.end_byte
+    else:
+        body = node.child_by_field_name("body")
+        if body is not None and body.type != "ordered_field_declaration_list":
+            end = body.start_byte
+    header = source[node.start_byte : end].decode("utf-8", errors="replace")
+    return _collapse_ws(header.rstrip().removesuffix(";")) or None
+
+
 # JavaScript is deliberately omitted: untyped JS carries no declared
 # signature (ADR 0001 Slice 6), so `_signature` returns `None` for it.
 _SIGNATURE_EXTRACTORS: dict[str, Callable[[Node, bytes], str | None]] = {
     "python": _python_signature,
     "typescript": _ts_signature,
     "tsx": _ts_signature,
+    "rust": _rust_signature,
 }
 
 

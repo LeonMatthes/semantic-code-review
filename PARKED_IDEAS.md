@@ -117,6 +117,21 @@ ordering. Summarised here so they appear in the same backlog.
     actually live at the cited line. Explicitly tagged as more
     speculative — depends on how often refs land on the wrong line.
 
+### Rust symbol identity across impl blocks
+
+Rust qualified names currently come only from captured source containment;
+`impl` blocks do not provide an enclosing symbol. Repeated method or
+associated-item names can therefore collide, and the change detector's
+name-keyed map can overwrite entries. The initial Rust integration retains
+this identity algorithm.
+
+Follow-up work must distinguish inherent implementations, trait
+implementations, repeated `impl` blocks, and conditional definitions.
+Regression cases must demonstrate that distinct items remain distinct in
+outlines, symbol deltas, and sidebar data. Decide symbol identity and
+`impl` grouping together rather than introducing synthetic names as a
+temporary workaround. See [Rust coverage](TREE_SITTER.md#rust).
+
 ## Other parked ideas (not specifically tied to the live process)
 
 18. **Per-file / change-wide comment anchors.** Reviewers can currently
