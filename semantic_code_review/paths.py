@@ -175,7 +175,7 @@ class RunDir:
     @property
     def repo_git(self) -> Path:
         """The git dir the worktrees hang off — a fresh bare clone for
-        GitHub runs, a symlink to the cwd repo's `.git` for local ones.
+        GitHub runs, a symlink to the cwd repo's Git directory for local ones.
         """
         return self.path / "repo.git"
 

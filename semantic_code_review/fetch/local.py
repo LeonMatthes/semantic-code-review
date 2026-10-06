@@ -76,7 +76,7 @@ class LocalResolved:
     spec: RunSpec
     repo_git: Path  # .git dir of the cwd repo
     head_is_working: bool  # if True, head/ is a symlink to head_worktree
-    head_worktree: Path  # the cwd checkout (used only when head_is_working)
+    head_worktree: Path  # the cwd checkout
     mode: str  # "range" | "ref-working" | "ref..HEAD" | ...
 
     # Convenience aliases so tests don't need to dig through `.spec.*`.
@@ -119,9 +119,12 @@ def resolve_local_diff(
     `runs_root`. Caller-owned: deciding where to materialise.
     """
     cwd = (repo_root or _find_repo_root(Path.cwd())).resolve()
-    git_dir = cwd / ".git"
-    if not git_dir.exists():
+    if not (cwd / ".git").exists():
         raise LocalDiffError(f"not a git repo: {cwd}")
+    try:
+        git_dir = Path(git_ops.git(cwd, "rev-parse", "--absolute-git-dir").strip())
+    except git_ops.GitError as error:
+        raise LocalDiffError(str(error)) from error
 
     spec_str = spec.strip()
     if not spec_str:
@@ -190,7 +193,7 @@ def resolve_local_diff(
 def setup_local_worktrees(run_dir: paths.RunDir, resolved: LocalResolved) -> None:
     """Set up the run's `repo.git` / `base` / `head` from a `LocalResolved`.
 
-    `repo.git` is a symlink to the cwd repo's `.git` so RepoTools can
+    `repo.git` is a symlink to the cwd repo's Git directory so RepoTools can
     `git grep` / `git log` through it.
 
     `head/` is a symlink to the cwd checkout when `head_is_working`
@@ -201,6 +204,8 @@ def setup_local_worktrees(run_dir: paths.RunDir, resolved: LocalResolved) -> Non
     the LLM should always read pre-change code from a stable tree.
     """
     repo_git_link = run_dir.repo_git
+    if repo_git_link.is_symlink() and not repo_git_link.is_dir():
+        repo_git_link.unlink()
     if not repo_git_link.exists():
         _symlink(repo_git_link, resolved.repo_git)
 
@@ -212,14 +217,14 @@ def setup_local_worktrees(run_dir: paths.RunDir, resolved: LocalResolved) -> Non
             _symlink(head_link, resolved.head_worktree)
     elif not head_link.exists():
         git_ops.worktree_add(
-            resolved.repo_git.parent,
+            resolved.head_worktree,
             head_link.resolve(),
             resolved.head_sha,
         )
 
     if not base_dir.exists():
         git_ops.worktree_add(
-            resolved.repo_git.parent,
+            resolved.head_worktree,
             base_dir.resolve(),
             resolved.base_sha,
         )

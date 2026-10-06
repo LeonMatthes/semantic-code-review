@@ -1,8 +1,7 @@
 """fetch.local.resolve_local_diff: resolve input specs against a tmp repo.
 
 Probes the resolved object's structural fields (mode, head_is_working,
-raw_diff, head_sha, slug). Materialisation tests live separately; this
-file covers the resolve step alone.
+raw_diff, head_sha, slug).
 """
 
 from __future__ import annotations
@@ -12,9 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from semantic_code_review.augment.tools import RepoTools
 from semantic_code_review.fetch import (
     EmptyDiff,
     LocalDiffError,
+    materialize_local_diff_run,
     resolve_local_diff,
 )
 
@@ -185,3 +186,53 @@ def test_blob_pair_needs_path(repo: Path) -> None:
 def test_empty_second_endpoint_errors(repo: Path) -> None:
     with pytest.raises(LocalDiffError, match="empty second endpoint"):
         resolve_local_diff("HEAD~1", right="  ", repo_root=repo)
+
+
+@pytest.fixture(params=["primary", "linked", "separate-git-dir"])
+def review_checkout(repo: Path, tmp_path: Path, request) -> Path:
+    if request.param == "linked":
+        checkout = tmp_path / "linked"
+        _sh(repo, "git", "worktree", "add", "--detach", str(checkout), "HEAD")
+        return checkout
+    if request.param == "separate-git-dir":
+        _sh(repo, "git", "init", "--separate-git-dir", str(tmp_path / "metadata"))
+    return repo
+
+
+@pytest.mark.parametrize(("spec", "head_text"), [("HEAD~1..HEAD", "x = 2\n"), ("HEAD~1", "x = 3\n")])
+def test_materialize_local_review_from_git_layouts(review_checkout: Path, tmp_path: Path, spec, head_text) -> None:
+    (review_checkout / "a.py").write_text(head_text)
+    resolved = resolve_local_diff(spec, repo_root=review_checkout)
+    run_dir = materialize_local_diff_run(spec, tmp_path / "runs", repo_root=review_checkout)
+
+    assert resolved.repo_git.is_dir()
+    assert run_dir.repo_git.resolve() == resolved.repo_git
+    assert (run_dir.base / "a.py").read_text() == "x = 1\n"
+    assert (run_dir.head / "a.py").read_text() == head_text
+    assert run_dir.head.is_symlink() == resolved.head_is_working
+    repo_tools = RepoTools(
+        head_worktree=run_dir.head,
+        repo_git=run_dir.repo_git,
+        base_sha=resolved.base_sha,
+        head_sha=resolved.head_sha,
+    )
+    assert repo_tools.read_file_at(resolved.base_sha, "a.py") == "x = 1\n"
+    assert repo_tools.git_log("a.py") == _sh(review_checkout, "git", "log", "-n5", "--oneline", "--", "a.py")
+    repo_tools.compute_symbol_delta()
+
+
+@pytest.mark.parametrize("review_checkout", ["linked"], indirect=True)
+@pytest.mark.parametrize("broken_target", ["gitfile", "missing"])
+def test_reusing_local_run_repairs_git_link(review_checkout: Path, tmp_path: Path, broken_target) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = materialize_local_diff_run("HEAD~1..HEAD", runs_root, repo_root=review_checkout)
+    target = review_checkout / (".git" if broken_target == "gitfile" else "missing")
+    run_dir.repo_git.unlink()
+    run_dir.repo_git.symlink_to(target)
+    run_dir.comments.write_text("[]\n")
+
+    assert materialize_local_diff_run("HEAD~1..HEAD", runs_root, repo_root=review_checkout) == run_dir
+    assert run_dir.repo_git.is_dir()
+    assert run_dir.comments.read_text() == "[]\n"
+    base_sha = _sh(review_checkout, "git", "rev-parse", "HEAD~1").strip()
+    assert _sh(run_dir.repo_git, "git", "show", f"{base_sha}:a.py") == "x = 1\n"
