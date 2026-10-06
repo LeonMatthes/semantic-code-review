@@ -475,9 +475,63 @@ def _file_block(f: AnnotatedFile, idx: int, syms: _FileSymbols) -> dict[str, Any
         "summary": ann.summary,
         "symbols": ann.symbols.model_dump() if ann.symbols else {"added": [], "modified": [], "removed": []},
         "fold_regions": _fold_region_blocks(f, syms, rows, head_lines),
+        "symbol_context": _symbol_context_blocks(hunks, syms),
         "head_line_count": None if head_lines is None else len(head_lines),
         "hunks": hunks,
     }
+
+
+def _symbol_context_blocks(hunks: list[dict[str, Any]], syms: _FileSymbols) -> dict[str, Any]:
+    contexts: dict[str, Any] = {}
+    forests = {"old": syms.base, "new": syms.head}
+    definitions: dict[str, dict[str, list[structural.Symbol]]] = {}
+    for side, roots in forests.items():
+        definitions[side] = {}
+        pending = list(roots)
+        while pending:
+            symbol = pending.pop()
+            definitions[side].setdefault(symbol.qualified_name, []).append(symbol)
+            pending.extend(symbol.children)
+    for hunk in hunks:
+        selected: dict[str, dict[tuple[int, int], structural.Symbol]] = {"old": {}, "new": {}}
+        for row in hunk["rows"]:
+            if row["kind"] == "ctx":
+                continue
+            for side, symbols in forests.items():
+                line = row[f"{side}_line"]
+                symbol = _context_enclosing_symbol(symbols, line) if line is not None else None
+                if symbol is not None:
+                    if not row[f"{side}_text"].strip() and symbol.kind in ("class", "module", "trait", "interface"):
+                        continue
+                    selected[side][(symbol.range.start_line, symbol.range.end_line)] = symbol
+        names = {symbol.qualified_name for symbols in selected.values() for symbol in symbols.values()}
+        for side, symbols in definitions.items():
+            for name in names:
+                candidates = symbols.get(name, [])
+                if len(candidates) == 1 and all(len(definitions[image].get(name, [])) == 1 for image in forests):
+                    symbol = candidates[0]
+                    selected[side][(symbol.range.start_line, symbol.range.end_line)] = symbol
+        if names:
+            contexts[hunk["id"]] = {
+                side: [
+                    {
+                        "start": (symbol.context_range or symbol.range).start_line,
+                        "end": (symbol.context_range or symbol.range).end_line,
+                        "name": symbol.qualified_name,
+                    }
+                    for symbol in sorted(symbols.values(), key=lambda symbol: symbol.range.start_line)
+                ]
+                for side, symbols in selected.items()
+            }
+    return contexts
+
+
+def _context_enclosing_symbol(symbols: list[structural.Symbol], line: int) -> structural.Symbol | None:
+    for symbol in symbols:
+        span = symbol.context_range or symbol.range
+        if span.start_line <= line <= span.end_line:
+            return _context_enclosing_symbol(symbol.children, line) or symbol
+    return None
 
 
 def _fold_region_blocks(

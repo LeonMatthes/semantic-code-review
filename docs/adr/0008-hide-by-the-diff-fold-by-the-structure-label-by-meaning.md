@@ -75,10 +75,24 @@ reach.**
 
 ### Hiding follows the diff — as a default, never a bound
 
-What is on screen by default is what changed. Unchanged context sits behind
-an expand chip, and a hunk a sidebar filter demotes joins it there. This is
-the collapsible-region model as it stands; the decision is that it is the
-*only* hiding mechanism, and that it is not a fold. Revealing hidden content
+When hunk code is shown, the smallest definitions enclosing its changed
+lines are shown in full on both sides. Their source ranges come from the
+structural parser, including declaration attachments such as Python
+decorators and Rust attributes and documentation. Language queries select
+these attachments, retaining the original definition range for folds and
+symbol changes. Blank lines do not detach Rust documentation. Three source
+lines before and after each attached definition are also required, clamped
+to each side's file bounds. Overlapping ranges share one row stream. Files
+without structural definitions keep the hunk-based visibility model.
+
+Unchanged context outside those padded definitions sits behind an expand chip.
+A sidebar filter also hides other hunks outside the required context;
+changes within them stay visible with their original hunk identities and
+theme membership. A selected theme marks its own hunks in the margin,
+while other visible changes use softer backgrounds and compact summaries.
+An incidental hunk does not expand the definitions its hidden changes
+touch. Required symbol context has no gap-collapse control; deliberate
+hunk and definition folds still apply. Revealing optional hidden content
 puts it on screen at the current fold depth — it does not open it.
 
 **Everything in the file is disclosable.** The hidden set is the whole file

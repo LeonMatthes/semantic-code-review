@@ -44,7 +44,15 @@ class _LangSupport:
 def _python_support() -> tuple[Language, str]:
     import tree_sitter_python as tsp
 
-    return Language(tsp.language()), tsp.TAGS_QUERY
+    return Language(tsp.language()), tsp.TAGS_QUERY + "\n" + _PYTHON_CONTEXT_TAGS
+
+
+_PYTHON_CONTEXT_TAGS = """
+(decorated_definition
+    definition: (function_definition name: (identifier) @name) @definition.function) @context
+(decorated_definition
+    definition: (class_definition name: (identifier) @name) @definition.class) @context
+"""
 
 
 # The upstream tree-sitter-typescript `tags.scm` is *additive* over the
@@ -84,20 +92,32 @@ def _tsx_support() -> tuple[Language, str]:
     return Language(tst.language_tsx()), _typescript_tags()
 
 
-_RUST_TAGS = """
-(function_item name: (identifier) @name) @definition.function
-(function_signature_item name: (identifier) @name) @definition.function
-(struct_item name: (type_identifier) @name) @definition.struct
-(enum_item name: (type_identifier) @name) @definition.enum
-(union_item name: (type_identifier) @name) @definition.union
-(trait_item name: (type_identifier) @name) @definition.trait
-(type_item name: (type_identifier) @name) @definition.type
-(associated_type name: (type_identifier) @name) @definition.type
-(const_item name: (identifier) @name) @definition.constant
-(static_item name: (identifier) @name) @definition.static
-(mod_item name: (identifier) @name) @definition.module
-(macro_definition name: (identifier) @name) @definition.macro
+_RUST_DEFINITION_TAGS = (
+    "(function_item name: (identifier) @name) @definition.function",
+    "(function_signature_item name: (identifier) @name) @definition.function",
+    "(struct_item name: (type_identifier) @name) @definition.struct",
+    "(enum_item name: (type_identifier) @name) @definition.enum",
+    "(union_item name: (type_identifier) @name) @definition.union",
+    "(trait_item name: (type_identifier) @name) @definition.trait",
+    "(type_item name: (type_identifier) @name) @definition.type",
+    "(associated_type name: (type_identifier) @name) @definition.type",
+    "(const_item name: (identifier) @name) @definition.constant",
+    "(static_item name: (identifier) @name) @definition.static",
+    "(mod_item name: (identifier) @name) @definition.module",
+    "(macro_definition name: (identifier) @name) @definition.macro",
+)
 
+_RUST_CONTEXT_PREFIX = """[
+    (line_comment (outer_doc_comment_marker))
+    (block_comment (outer_doc_comment_marker))
+    (attribute_item)
+]+ @context"""
+
+_RUST_TAGS = (
+    "\n".join(
+        [*_RUST_DEFINITION_TAGS] + [f"({_RUST_CONTEXT_PREFIX} . {definition})" for definition in _RUST_DEFINITION_TAGS]
+    )
+    + """
 (call_expression function: [(identifier) (scoped_identifier)] @reference.call)
 (call_expression function: (field_expression field: (field_identifier) @reference.call))
 (call_expression function: (generic_function
@@ -108,6 +128,7 @@ _RUST_TAGS = """
 (impl_item trait: (_) @reference.implementation)
 (impl_item type: (_) @reference.implementation)
 """
+)
 
 
 def _rust_support() -> tuple[Language, str]:
@@ -151,6 +172,7 @@ class _RawDef:
     kind: str
     name: str
     node: Node
+    context_nodes: list[Node]
 
 
 def outline_symbols(source: bytes | str, lang_name: str) -> list[Symbol]:
@@ -175,7 +197,7 @@ def outline_symbols(source: bytes | str, lang_name: str) -> list[Symbol]:
 
 def _collect_definitions(root: Node, query: Query, source: bytes) -> list[_RawDef]:
     """Pull `(kind, name, node)` for each `@definition.*` match."""
-    out: list[_RawDef] = []
+    definitions: dict[int, _RawDef] = {}
     for _, caps in QueryCursor(query).matches(root):
         def_node: Node | None = None
         kind: str | None = None
@@ -188,33 +210,38 @@ def _collect_definitions(root: Node, query: Query, source: bytes) -> list[_RawDe
         name_nodes = caps.get("name")
         if not name_nodes:
             continue
-        out.append(_RawDef(kind=kind, name=_text(source, name_nodes[0]), node=def_node))
-    return out
+        definition = definitions.setdefault(
+            def_node.id,
+            _RawDef(kind=kind, name=_text(source, name_nodes[0]), node=def_node, context_nodes=[]),
+        )
+        definition.context_nodes.extend(caps.get("context", []))
+    return list(definitions.values())
 
 
 def _nest(defs: list[_RawDef], source: bytes, lang_name: str) -> list[Symbol]:
     """Fold flat definitions into a tree by source-span containment."""
     # Outermost first; ties broken so the wider span precedes the narrower.
-    defs.sort(key=lambda d: (d.node.start_byte, -d.node.end_byte))
+    defs.sort(key=lambda definition: (definition.node.start_byte, -definition.node.end_byte))
     roots: list[Symbol] = []
     stack: list[tuple[_RawDef, Symbol]] = []
-    for d in defs:
-        sym = Symbol(
-            kind=d.kind,
-            name=d.name,
-            qualified_name=d.name,
-            range=_range(d.node),
-            signature=_signature(d.node, source, lang_name),
+    for definition in defs:
+        symbol = Symbol(
+            kind=definition.kind,
+            name=definition.name,
+            qualified_name=definition.name,
+            range=_range(definition.node),
+            context_range=_context_range([definition.node, *definition.context_nodes]),
+            signature=_signature(definition.node, source, lang_name),
         )
-        while stack and not _contains(stack[-1][0].node, d.node):
+        while stack and not _contains(stack[-1][0].node, definition.node):
             stack.pop()
         if stack:
-            parent_sym = stack[-1][1]
-            sym.qualified_name = f"{parent_sym.qualified_name}.{d.name}"
-            parent_sym.children.append(sym)
+            parent_symbol = stack[-1][1]
+            symbol.qualified_name = f"{parent_symbol.qualified_name}.{definition.name}"
+            parent_symbol.children.append(symbol)
         else:
-            roots.append(sym)
-        stack.append((d, sym))
+            roots.append(symbol)
+        stack.append((definition, symbol))
     return roots
 
 
@@ -243,6 +270,17 @@ def _range(node: Node) -> SymbolRange:
         end_line=ep.row + 1,
         start_col=sp.column,
         end_col=ep.column,
+    )
+
+
+def _context_range(nodes: list[Node]) -> SymbolRange:
+    start = min(nodes, key=lambda node: node.start_byte).start_point
+    end = max(nodes, key=lambda node: node.end_byte).end_point
+    return SymbolRange(
+        start_line=start.row + 1,
+        end_line=end.row + 1,
+        start_col=start.column,
+        end_col=end.column,
     )
 
 

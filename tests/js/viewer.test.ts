@@ -4773,6 +4773,29 @@ describe("overview mode (ADR 0007)", () => {
         .toBe(true);
     });
 
+    test("symbol source loading preserves the panel's hunk styling independently of diff theme tags", async () => {
+      const source = Array.from({ length: 10 }, (_, index) => `source ${index + 1}`).join("\n") + "\n";
+      const context = [{ start: 1, end: 2, name: "guard" }];
+      serveFileText(0, "a.py", source, source);
+      await bootWithExplainer({ status: 200, body: PANEL_DOC }, {
+        pending: false,
+        files: FILES.map((file, index) => index === 0 ? {
+          ...file, head_line_count: 10, symbol_context: { H0_0: { old: context, new: context } },
+        } : file),
+        groups: [{ id: "G0", title: "Another theme", hunk_ids: ["H1_0"] }],
+      });
+      hunkRef().click();
+      const panel = document.querySelector<HTMLElement>("#app .explainer-detail")!;
+      const before = panel.querySelector('.file[data-id="F0"]')!;
+      expect(panel.querySelector('.hunk[data-id="H0_0"]')!.classList.contains("ungrouped")).toBe(false);
+      expect(panel.querySelector(".symbol-context-status")).not.toBeNull();
+      await tick();
+      expect(panel.querySelector('.file[data-id="F0"]')).not.toBe(before);
+      expect(panel.querySelector(".symbol-expanded")).not.toBeNull();
+      expect(panel.querySelector('.hunk[data-id="H0_0"]')!.classList.contains("ungrouped")).toBe(false);
+      expect(panel.querySelectorAll(".cell-lineno-new:not(.empty)")).toHaveLength(5);
+    });
+
     test("fold regions attach inside the panel's copy of a file", async () => {
       const panel = await bootWithPanel();
       hunkRef().click();
@@ -5354,6 +5377,445 @@ describe("overview mode (ADR 0007)", () => {
 // from /file-text when its chip is clicked, so nothing about a file's
 // size or side puts a line out of reach. The fetched text is the cache
 // rendered mode reads.
+
+describe("automatic symbol context", () => {
+  const source = Array.from({ length: 40 }, (_, index) => `source ${index + 1}`).join("\n") + "\n";
+  const rows = (start: number, end: number, changed: number[]): RowBlock[] =>
+    Array.from({ length: end - start + 1 }, (_, index) => {
+      const line = start + index;
+      return {
+        kind: changed.includes(line) ? "pair" : "ctx",
+        old_line: line, new_line: line,
+        old_text: `source ${line}`, new_text: changed.includes(line) ? `updated ${line}` : `source ${line}`,
+      };
+    });
+  const span = (start: number, end: number): { old: SymbolContextSpan[]; new: SymbolContextSpan[] } => {
+    const ranges = [{ start, end, name: "process" }];
+    return { old: ranges, new: ranges };
+  };
+  const lines = (): number[] => Array.from(document.querySelectorAll<HTMLElement>("#app .cell-lineno-new:not(.empty)"))
+    .filter((cell) => cell.closest<HTMLElement>(".row")?.style.display !== "none")
+    .map((cell) => Number(cell.textContent));
+  const select = (id: string): void => {
+    document.querySelector<HTMLElement>(`[data-axis="themes"][data-pill-id="${id}"]`)!.click();
+  };
+  function delayedSource(): () => void {
+    let complete: () => void = () => {};
+    vi.mocked(fetch).mockImplementationOnce(((url: string, init?: RequestInit) => {
+      expect(url).toContain("/file-text");
+      fetchCalls.push({ url, init });
+      return new Promise<Response>((resolve) => {
+        complete = () => resolve({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ file_idx: 0, path: "a.py", base: source, head: source }),
+        } as Response);
+      });
+    }) as typeof fetch);
+    return () => complete();
+  }
+  function openDraft(line: number): HTMLTextAreaElement {
+    const cell = Array.from(document.querySelectorAll<HTMLElement>("#app .cell-lineno-new"))
+      .find((cell) => cell.textContent === String(line))!;
+    cell.click();
+    const textarea = document.querySelector<HTMLTextAreaElement>(".annot-editor textarea")!;
+    textarea.value = "Unfinished review draft";
+    return textarea;
+  }
+  async function mount(
+    overrides: Record<string, unknown> = {}, groups?: ViewerData["groups"], options: BootOptions & { pending?: boolean } = {},
+  ): Promise<void> {
+    serveFileText(0, "a.py", source, source);
+    await bootViewer(makeData({
+      pending: options.pending ?? false,
+      groups: groups ?? [
+        { id: "G0", title: "First theme", hunk_ids: ["H0_0"] },
+        { id: "G1", title: "Second theme", hunk_ids: ["H0_1"] },
+      ],
+      files: [{
+        id: "F0", path: "a.py", status: "modified", language: "python", adds: 3, dels: 3,
+        summary: "", symbols: { added: [], modified: [], removed: [] }, head_line_count: 40, fold_regions: [],
+        symbol_context: { H0_0: span(3, 30), H0_1: span(3, 30), H0_2: span(36, 39) },
+        hunks: [
+          makeHunkBlock("H0_0", "First change", { old_start: 5, new_start: 5, old_count: 3, new_count: 3, rows: rows(5, 7, [6]) }),
+          makeHunkBlock("H0_1", "Second change", {
+            old_start: 19, new_start: 19, old_count: 3, new_count: 3, rows: rows(19, 21, [20]),
+            spans: [{ id: "H0_1:span:20-20", start: 20, end: 20, intent: "Second annotation", smells: [], context: "", refs: [] }],
+          }),
+          makeHunkBlock("H0_2", "Unrelated change", { old_start: 33, new_start: 33, old_count: 7, new_count: 7, rows: rows(33, 39, [36]) }),
+        ],
+        ...overrides,
+      }],
+    }), options);
+  }
+
+  test("themes expose one complete symbol, keep other changes annotated, and clip incidental context", async () => {
+    await mount();
+    select("G0");
+    await tick();
+    const expected = Array.from({ length: 33 }, (_, index) => index + 1);
+    expect(lines()).toEqual(expected);
+    const selected = document.querySelector("#app .hunk.selected-theme")!;
+    expect(selected.getAttribute("data-id")).toBe("H0_0");
+    const other = document.querySelector("#app .hunk.other-theme")!;
+    expect(other.getAttribute("data-id")).toBe("H0_1");
+    expect(other.querySelector(".hunk-pos")).toBeNull();
+    expect(other.querySelector(".other-theme-label")?.textContent).toBe("Other theme");
+    expect(other.querySelector(".span-text")?.textContent).toContain("Second annotation");
+    expect(document.querySelector('#app .hunk[data-id="H0_2"]')).toBeNull();
+    expect(document.querySelectorAll(".symbol-context .gap-collapse")).toHaveLength(0);
+    for (const theme of ["G1", "G0"]) {
+      select(theme);
+      expect(lines()).toEqual(expected);
+    }
+    expect(fetchCalls.filter((call) => call.url.includes("/file-text"))).toHaveLength(1);
+    const below = document.querySelector<HTMLElement>("#app .gap-chip")!;
+    below.click();
+    const expanded = Array.from({ length: 40 }, (_, index) => index + 1);
+    expect(lines()).toEqual(expanded);
+    select("G1");
+    select("G0");
+    expect(lines()).toEqual(expanded);
+    document.querySelector<HTMLButtonElement>("#app .gap-collapse")!.click();
+    expect(lines()).toEqual(expected);
+  });
+
+  test("padding shows an annotated neighboring theme without expanding its complete symbol", async () => {
+    const paddingAnnotation = {
+      id: "H0_2:span:32-32", start: 32, end: 32, intent: "Padding annotation", smells: [], context: "", refs: [],
+    };
+    await mount({
+      symbol_context: { H0_0: span(3, 30), H0_1: span(3, 30), H0_2: span(32, 39) },
+      hunks: [
+        makeHunkBlock("H0_0", "First change", { old_start: 5, new_start: 5, old_count: 3, new_count: 3, rows: rows(5, 7, [6]) }),
+        makeHunkBlock("H0_2", "Neighboring change", {
+          old_start: 31, new_start: 31, old_count: 9, new_count: 9, rows: rows(31, 39, [32, 37]), spans: [paddingAnnotation],
+        }),
+      ],
+    });
+    select("G0");
+    await tick();
+    expect(lines()).toEqual(Array.from({ length: 33 }, (_, index) => index + 1));
+    const neighbor = document.querySelector('#app .hunk[data-id="H0_2"]')!;
+    expect(neighbor.classList.contains("other-theme")).toBe(true);
+    expect(neighbor.querySelector(".other-theme-label")?.textContent).toBe("Other theme");
+    expect(neighbor.querySelector(".span-text")?.textContent).toContain("Padding annotation");
+    expect(document.querySelectorAll(".symbol-context .gap-collapse")).toHaveLength(0);
+    document.querySelector<HTMLButtonElement>("#app .gap-chip")!.click();
+    expect(lines()).toContain(34);
+    document.querySelector<HTMLButtonElement>("#app .gap-collapse")!.click();
+    expect(lines()).toEqual(Array.from({ length: 33 }, (_, index) => index + 1));
+  });
+
+  test("membership in both themes remains selected, and show-all carries no selected marker", async () => {
+    await mount({}, [
+      { id: "G0", title: "First theme", hunk_ids: ["H0_0", "H0_1"] },
+      { id: "G1", title: "Second theme", hunk_ids: ["H0_1"] },
+    ]);
+    select("G0");
+    await tick();
+    expect(document.querySelectorAll("#app .selected-theme")).toHaveLength(2);
+    expect(document.querySelectorAll("#app .other-theme")).toHaveLength(0);
+    select("G0");
+    expect(document.querySelectorAll("#app .selected-theme, #app .other-theme")).toHaveLength(0);
+    expect(lines().length).toBe(new Set(lines()).size);
+  });
+
+  test("a deliberately folded hunk can reopen through its compact other-theme header", async () => {
+    await mount();
+    select("G1");
+    await tick();
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"] .hunk-header')!.click();
+    select("G0");
+    const folded = document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"]')!;
+    expect(folded.classList.contains("other-theme")).toBe(true);
+    expect(folded.classList.contains("folded")).toBe(true);
+    expect(folded.querySelector(".hunk-pos")).toBeNull();
+    expect(folded.querySelector(".chevron")).not.toBeNull();
+    folded.querySelector<HTMLElement>(".other-theme-header")!.click();
+    const opened = document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"]')!;
+    expect(opened.classList.contains("folded")).toBe(false);
+    expect(lines()).toContain(20);
+    expect(opened.querySelector(".hunk-pos")).toBeNull();
+  });
+
+  test("opening one summary exposes same-symbol changes while unrelated summaries and deliberate folds persist", async () => {
+    await mount();
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_0"] .hunk-header')!.click();
+    await tick();
+    expect(document.querySelector('#app .hunk[data-id="H0_1"]')!.classList.contains("folded")).toBe(false);
+    expect(document.querySelector('#app .hunk[data-id="H0_2"]')!.classList.contains("folded")).toBe(true);
+    expect(lines()).toContain(20);
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"] .hunk-header')!.click();
+    expect(document.querySelector('#app .hunk[data-id="H0_1"]')!.classList.contains("folded")).toBe(true);
+    expect(lines()).not.toContain(20);
+    expect(document.querySelector('#app .hunk[data-id="H0_2"]')!.classList.contains("folded")).toBe(true);
+  });
+
+  test("closing a hunk opened from summaries returns it to the level baseline", async () => {
+    await mount();
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_0"] .hunk-header')!.click();
+    await tick();
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_0"] .hunk-header')!.click();
+    document.querySelector<HTMLElement>('.fold-slider button[data-fold="code"]')!.click();
+    expect(document.querySelector('#app .hunk[data-id="H0_0"]')!.classList.contains("folded")).toBe(false);
+    expect(lines()).toContain(6);
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_0"] .hunk-header')!.click();
+    document.querySelector<HTMLElement>('.fold-slider button[data-fold="hunks"]')!.click();
+    document.querySelector<HTMLElement>('.fold-slider button[data-fold="code"]')!.click();
+    expect(document.querySelector('#app .hunk[data-id="H0_0"]')!.classList.contains("folded")).toBe(true);
+  });
+
+  test("a clipped hunk can have two visible pieces and receives SSE updates in both", async () => {
+    const hunks = [
+      makeHunkBlock("H0_0", "First change", { old_start: 5, new_start: 5, old_count: 2, new_count: 2, rows: rows(5, 6, [5]) }),
+      makeHunkBlock("H0_1", "Crossing change", { old_start: 9, new_start: 9, old_count: 15, new_count: 15, rows: rows(9, 23, [9, 15, 22]) }),
+      makeHunkBlock("H0_2", "Last change", { old_start: 27, new_start: 27, old_count: 2, new_count: 2, rows: rows(27, 28, [27]) }),
+    ];
+    await mount({ hunks, symbol_context: { H0_0: span(3, 10), H0_2: span(20, 30) } }, [
+      { id: "G0", title: "Selected theme", hunk_ids: ["H0_0", "H0_2"] },
+      { id: "G1", title: "Other theme", hunk_ids: ["H0_1"] },
+    ]);
+    select("G0");
+    await tick();
+    expect(document.querySelectorAll('#app .hunk[data-id="H0_1"]')).toHaveLength(2);
+    expect(lines()).not.toContain(15);
+    expect(lines()).toContain(22);
+    lastEventSource().dispatch("hunk", {
+      file_idx: 0, hunk_idx: 1, ok: true, block: { ...hunks[1], intent: "Updated crossing summary" },
+    });
+    await tick();
+    expect(Array.from(document.querySelectorAll('#app .hunk[data-id="H0_1"] .hunk-intent'))
+      .map((element) => element.textContent)).toEqual(["Updated crossing summary", "Updated crossing summary"]);
+    expect(lines().length).toBe(new Set(lines()).size);
+  });
+
+  test("a fold label for a crossing span scrolls to its own visible island", async () => {
+    const crossing = { id: "H0_1:span:9-22", start: 9, end: 22, intent: "Crossing annotation", smells: [], context: "", refs: [] };
+    const crossingRows = rows(9, 23, [9, 15, 22]).flatMap((row) => {
+      if (row.new_line! < 19) return [row];
+      const shifted = { ...row, old_line: row.old_line! + 1 };
+      return row.new_line === 19
+        ? [{ kind: "del" as const, old_line: 19, new_line: null, old_text: "deleted opener", new_text: "" }, shifted]
+        : [shifted];
+    });
+    const hunks = [
+      makeHunkBlock("H0_0", "First change", { old_start: 5, new_start: 5, old_count: 2, new_count: 2, rows: rows(5, 6, [5]) }),
+      makeHunkBlock("H0_1", "Crossing change", { old_start: 9, new_start: 9, old_count: 16, new_count: 15, rows: crossingRows, spans: [crossing] }),
+      makeHunkBlock("H0_2", "Last change", { old_start: 28, new_start: 27, old_count: 2, new_count: 2, rows: rows(27, 28, [27]).map((row) => ({ ...row, old_line: row.old_line! + 1 })) }),
+    ];
+    await mount({
+      hunks, symbol_context: { H0_0: span(3, 10), H0_2: { old: span(19, 31).old, new: span(20, 30).new } },
+      fold_regions: [{ context: "left", right_start: null, right_end: null, left_start: 19, left_end: 23,
+        qualified_name: "later", kind: "function", has_changes: true, summary: "Later symbol" }],
+    }, [{ id: "G0", title: "Selected theme", hunk_ids: ["H0_0", "H0_2"] }]);
+    select("G0");
+    await tick();
+    const expected = document.querySelectorAll<HTMLElement>('#app .span-text[data-span-id="H0_1:span:9-22"]')[1];
+    expect(expected).toBeDefined();
+    const marker = Array.from(document.querySelectorAll<HTMLElement>("#app .half-old .row"))
+      .find((row) => row.querySelector(".cell-lineno-old")?.textContent === "19")!.querySelector(".fold-chev")!;
+    marker.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const label = document.querySelector<HTMLElement>('#app .label-span[data-id="H0_1:span:9-22"]')!;
+    expect(label).not.toBeNull();
+    const scrolled = recordingScrolls(() => label.click());
+    expect(scrolled).toEqual([expected]);
+  });
+
+  test("summary modes leave symbol disclosure idle and failed automatic loading remains retryable", async () => {
+    await mount();
+    expect(fetchCalls.filter((call) => call.url.includes("/file-text"))).toHaveLength(0);
+    serveByUrl("/file-text?file_idx=0", { status: 500, body: {} });
+    select("G0");
+    await tick();
+    expect(document.querySelector(".symbol-context-status")?.textContent).toContain("retry");
+    select("G1");
+    await tick();
+    expect(document.querySelector(".symbol-context-status")?.textContent).toContain("retry");
+    expect(fetchCalls.filter((call) => call.url.includes("/file-text"))).toHaveLength(1);
+    serveFileText(0, "a.py", source, source);
+    document.querySelector<HTMLButtonElement>(".symbol-context-status")!.click();
+    await tick();
+    expect(lines()).toHaveLength(33);
+    expect(document.querySelector(".symbol-context-status")).toBeNull();
+  });
+
+  test("automatic load replaces its file while preserving the rest of the page", async () => {
+    await mount();
+    select("G0");
+    const overview = document.querySelector("#app .pr-panel");
+    const sidebar = document.querySelector("#group-sidebar")!.firstChild;
+    const before = document.querySelector('#app .file[data-id="F0"]');
+    await tick();
+    expect(document.querySelector("#app .pr-panel")).toBe(overview);
+    expect(document.querySelector("#group-sidebar")!.firstChild).toBe(sidebar);
+    expect(document.querySelector('#app .file[data-id="F0"]')).not.toBe(before);
+  });
+
+  test("automatic source refresh preserves an unfinished editor until it closes", async () => {
+    await mount();
+    const complete = delayedSource();
+    select("G0");
+    const textarea = openDraft(6);
+    complete();
+    await tick();
+    expect(textarea.isConnected).toBe(true);
+    expect(textarea.value).toBe("Unfinished review draft");
+    expect(document.querySelector("#app .symbol-expanded")).toBeNull();
+    document.querySelector<HTMLButtonElement>(".comment-btn-cancel")!.click();
+    await tick();
+    expect(document.querySelector("#app .symbol-expanded")).not.toBeNull();
+    expect(lines()).toContain(30);
+  });
+
+  test("symbol-layout SSE preserves drafts and refreshes only its file after the editor closes", async () => {
+    await mount();
+    select("G0");
+    await tick();
+    const overview = document.querySelector("#app .pr-panel");
+    const textarea = openDraft(6);
+    lastEventSource().dispatch("hunk", {
+      file_idx: 0, hunk_idx: 0, ok: true,
+      block: makeHunkBlock("H0_0", "Updated while editing", { old_start: 5, new_start: 5, old_count: 3, new_count: 3, rows: rows(5, 7, [6]) }),
+    });
+    expect(textarea.isConnected).toBe(true);
+    expect(textarea.value).toBe("Unfinished review draft");
+    expect(document.querySelector("#app .pr-panel")).toBe(overview);
+    document.querySelector<HTMLButtonElement>(".comment-btn-cancel")!.click();
+    await tick();
+    expect(document.querySelector('#app .hunk[data-id="H0_0"] .hunk-intent')?.textContent).toBe("Updated while editing");
+    expect(document.querySelector("#app .pr-panel")).toBe(overview);
+  });
+
+  test("automatic expansion preserves a visible source line's scroll position", async () => {
+    await mount();
+    const complete = delayedSource();
+    select("G0");
+    document.documentElement.scrollTop = 0;
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement): DOMRect {
+      if (!this.classList.contains("row")) return original.call(this);
+      const line = Number(this.querySelector(".cell-lineno")?.textContent);
+      const top = line === 6 ? (this.closest(".symbol-expanded") ? 300 : 100) : -1000;
+      return { top, bottom: top + 20, left: 0, right: 100, width: 100, height: 20, x: 0, y: top, toJSON: () => ({}) };
+    });
+    complete();
+    await tick();
+    expect(document.documentElement.scrollTop).toBe(200);
+    document.documentElement.scrollTop = 0;
+  });
+
+  test.each([false, true])("thread navigation resumes after source loading unless input cancels it: %s", async (cancel) => {
+    await mount({}, undefined, {
+      comments: [{ id: "thread-20", file: "a.py", side: "new", line: 20, body: "Check timing", created_at: 1, updated_at: 1 }],
+    });
+    const complete = delayedSource();
+    const scrolled: Element[] = [];
+    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element): void { scrolled.push(this); });
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"] .label-comment')!.click();
+    expect(scrolled).toHaveLength(1);
+    if (cancel) document.dispatchEvent(new Event("wheel"));
+    complete();
+    await tick();
+    expect(scrolled).toHaveLength(cancel ? 1 : 2);
+    if (!cancel) {
+      expect(scrolled[1].isConnected).toBe(true);
+      expect(scrolled[1].getAttribute("data-thread-id")).toBe("thread-20");
+    }
+  });
+
+  test.each(["http", "shortened"])("failed %s symbol loading clears navigation before later updates or retry", async (failure) => {
+    await mount({}, undefined, {
+      pending: true,
+      comments: [{ id: "thread-20", file: "a.py", side: "new", line: 20, body: "Check timing", created_at: 1, updated_at: 1 }],
+    });
+    serveByUrl("/file-text?file_idx=0", failure === "http"
+      ? { status: 500, body: {} }
+      : { status: 200, body: { file_idx: 0, path: "a.py", base: source, head: "shortened\n" } });
+    const scrolled: Element[] = [];
+    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element): void { scrolled.push(this); });
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_1"] .label-comment')!.click();
+    expect(scrolled).toHaveLength(1);
+    await tick();
+    expect(document.querySelector(".symbol-context-status")?.textContent).toContain("retry");
+    expect(scrolled).toHaveLength(1);
+    lastEventSource().dispatch("hunk", {
+      file_idx: 0, hunk_idx: 1, ok: true,
+      block: makeHunkBlock("H0_1", "Updated after failure", { old_start: 19, new_start: 19, old_count: 3, new_count: 3, rows: rows(19, 21, [20]) }),
+    });
+    await tick();
+    expect(scrolled).toHaveLength(1);
+    document.querySelector<HTMLElement>('.scr-progress-grid .sq[data-id="H0_1"]')!.click();
+    expect(scrolled).toHaveLength(2);
+    expect(scrolled[1].getAttribute("data-id")).toBe("H0_1");
+    serveFileText(0, "a.py", source, source);
+    document.querySelector<HTMLButtonElement>(".symbol-context-status")!.click();
+    await tick();
+    expect(document.querySelector(".symbol-context-status")).toBeNull();
+    expect(scrolled).toHaveLength(2);
+  });
+
+  test("SSE updates summary layouts surgically even when the file has symbol metadata", async () => {
+    await mount();
+    const overview = document.querySelector("#app .pr-panel");
+    const file = document.querySelector('#app .file[data-id="F0"]');
+    const neighbor = document.querySelector('#app .hunk[data-id="H0_1"]');
+    lastEventSource().dispatch("hunk", {
+      file_idx: 0, hunk_idx: 0, ok: true,
+      block: makeHunkBlock("H0_0", "Updated summary", { old_start: 5, new_start: 5, old_count: 3, new_count: 3, rows: rows(5, 7, [6]) }),
+    });
+    expect(document.querySelector("#app .pr-panel")).toBe(overview);
+    expect(document.querySelector('#app .file[data-id="F0"]')).toBe(file);
+    expect(document.querySelector('#app .hunk[data-id="H0_1"]')).toBe(neighbor);
+    expect(document.querySelector('#app .hunk[data-id="H0_0"] .hunk-intent')?.textContent).toBe("Updated summary");
+    expect(fetchCalls.filter((call) => call.url.includes("/file-text"))).toHaveLength(0);
+  });
+
+  test("split hunk manifests include only folded-piece comments, crossing spans clip, and navigation reaches code", async () => {
+    const crossing = { id: "H0_1:span:9-22", start: 9, end: 22, intent: "Crossing annotation", smells: [], context: "", refs: [] };
+    const outside = { id: "H0_1:span:15-15", start: 15, end: 15, intent: "Hidden annotation", smells: [], context: "", refs: [] };
+    const hunks = [
+      makeHunkBlock("H0_0", "First change", { old_start: 5, new_start: 5, old_count: 2, new_count: 2, rows: rows(5, 6, [5]) }),
+      makeHunkBlock("H0_1", "Crossing change", { old_start: 9, new_start: 9, old_count: 15, new_count: 15, rows: rows(9, 23, [9, 15, 22]), spans: [crossing, outside] }),
+      makeHunkBlock("H0_2", "Last change", { old_start: 27, new_start: 27, old_count: 2, new_count: 2, rows: rows(27, 28, [27]) }),
+    ];
+    const comments = [15, 22].map((line) => ({
+      id: `comment-${line}`, file: "a.py", side: "new", line, body: `Comment on ${line}`, created_at: 1, updated_at: 1,
+    }));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mount({ hunks, symbol_context: { H0_2: span(20, 30) } }, undefined, { comments, pending: true });
+    document.querySelector<HTMLElement>('#app .hunk[data-id="H0_2"] .hunk-header')!.click();
+    await tick();
+    const pieces = document.querySelectorAll<HTMLElement>('#app .hunk[data-id="H0_1"]');
+    expect(pieces).toHaveLength(2);
+    expect(pieces[0].classList.contains("folded")).toBe(true);
+    expect(pieces[1].classList.contains("folded")).toBe(false);
+    expect(pieces[0].querySelector(".comment-manifest")?.textContent).toContain("Comment on 15");
+    expect(pieces[0].querySelector(".comment-manifest")?.textContent).not.toContain("Comment on 22");
+    expect(pieces[1].querySelector('[data-span-id="H0_1:span:9-22"]')?.textContent).toContain("Crossing annotation");
+    expect(pieces[1].querySelector('[data-span-id="H0_1:span:15-15"]')).toBeNull();
+    expect(warning).not.toHaveBeenCalled();
+    const scrolled = recordingScrolls(() => document.querySelector<HTMLElement>('.scr-progress-grid .sq[data-id="H0_1"]')!.click());
+    expect(scrolled).toEqual([pieces[1]]);
+    lastEventSource().dispatch("comment", { ...comments[1], body: "Updated visible comment" });
+    await tick();
+    expect(pieces[0].querySelector(".comment-manifest")?.textContent).not.toContain("Updated visible comment");
+    expect(pieces[1].textContent).toContain("Updated visible comment");
+  });
+
+  test("a shortened source does not substitute base lines and can be fetched again on retry", async () => {
+    await mount();
+    serveFileText(0, "a.py", source, "shortened\n");
+    select("G0");
+    await tick();
+    expect(document.querySelector(".symbol-context-status")?.textContent).toContain("retry");
+    expect(lines()).not.toContain(30);
+    serveFileText(0, "a.py", source, source);
+    document.querySelector<HTMLButtonElement>(".symbol-context-status")!.click();
+    await tick();
+    expect(lines()).toHaveLength(33);
+    expect(fetchCalls.filter((call) => call.url.includes("/file-text"))).toHaveLength(2);
+  });
+});
 
 describe("lazy disclosure", () => {
   type Row = Record<string, unknown>;

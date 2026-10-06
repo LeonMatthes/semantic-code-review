@@ -354,7 +354,7 @@ function _displayLine(c: ReviewerComment): number | null {
 /** Re-attach comment rows for the currently-rendered DOM. Called
  *  from render() after every full re-render so saved comments
  *  survive. No-op when there are no comments to render. */
-function renderAll(): void {
+function renderAll(files: Iterable<Element> = document.querySelectorAll(".file")): void {
   const all = _store.getAll();
   // Strip any LLM annotation rows whose source has been promoted to a
   // local comment. Diff rendering runs before /comments resolves on
@@ -371,7 +371,7 @@ function renderAll(): void {
     const k = `${c.file}|${c.side}|${ln}`;
     (byAnchor[k] ||= []).push(c);
   }
-  document.querySelectorAll(".file").forEach((fileEl) => {
+  for (const fileEl of files) {
     const pathEl = fileEl.querySelector(".file-path");
     const filePath = pathEl ? (pathEl.textContent || "") : "";
     fileEl.querySelectorAll(".row").forEach((row) => {
@@ -386,7 +386,7 @@ function renderAll(): void {
       if (!relevant) return;
       _refreshForAnchor(row as HTMLElement, { file: filePath, side, line: n });
     });
-  });
+  }
 }
 
 // --- Anchor lookup ------------------------------------------------------

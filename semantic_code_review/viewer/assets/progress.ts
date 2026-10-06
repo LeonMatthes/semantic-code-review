@@ -114,9 +114,8 @@ function _refreshCounters(): void {
 }
 
 function _scrollToHunk(hunkId: string): void {
-  const node = document.querySelector(
-    '.hunk[data-id="' + _cssEscape(hunkId) + '"]',
-  );
+  const selector = '.hunk[data-id="' + _cssEscape(hunkId) + '"]';
+  const node = document.querySelector(selector + ':not(.folded)') ?? document.querySelector(selector);
   if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 

@@ -165,24 +165,20 @@ function _collectFileRows(fileEl: HTMLElement): FileRow[] {
   const body = fileEl.querySelector(".file-body");
   if (!body) return [];
   const out: FileRow[] = [];
-  for (const child of Array.from(body.children) as HTMLElement[]) {
-    const cls = child.classList;
-    let source: HTMLElement | null = null;
-    if (cls.contains("hunk")) {
-      source = child.querySelector(".diff");
-    } else if (cls.contains("gap-expansion")) {
-      source = child;
-    }
-    if (!source) continue;
+  const collect = (source: HTMLElement): void => {
     const entry = FileRows.get(source);
-    if (!entry) continue;
+    if (!entry) {
+      for (const child of Array.from(source.children) as HTMLElement[]) collect(child);
+      return;
+    }
     for (let i = 0; i < entry.rows.length; i++) {
       out.push({
         ...entry.rows[i],
         oldEl: entry.oldEls[i], newEl: entry.newEls[i], container: source,
       });
     }
-  }
+  };
+  collect(body as HTMLElement);
   return out;
 }
 

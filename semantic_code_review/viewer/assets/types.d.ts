@@ -161,11 +161,18 @@ interface FileBlock {
    *  hangs chevrons on the rows it has rendered and derives nothing.
    *  Enclosing regions precede the regions they enclose. */
   fold_regions: FoldRegion[];
+  symbol_context?: Record<string, { old: SymbolContextSpan[]; new: SymbolContextSpan[] }>;
   /** Lines in the post-image, or null when there is none (a deleted
    *  file, or no head worktree). Bounds the collapsible region below
    *  the last hunk; the text itself comes from /file-text on demand. */
   head_line_count: number | null;
   hunks: HunkBlock[];
+}
+
+interface SymbolContextSpan {
+  start: number;
+  end: number;
+  name: string;
 }
 
 interface FileSymbols {

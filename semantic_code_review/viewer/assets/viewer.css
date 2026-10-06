@@ -558,6 +558,50 @@ html.dragging-divider { cursor: col-resize; user-select: none; }
 .hunk {
   background: var(--bg);
 }
+.symbol-expanded .hunk { border-left: 2px solid transparent; }
+.symbol-expanded .hunk.selected-theme { border-left-color: var(--accent); }
+.symbol-expanded .diff .cell-content { padding-left: 32px; }
+.symbol-expanded .cell-content::before { position: absolute; left: 19px; }
+.symbol-expanded .row-ins .cell-content-new::before,
+.symbol-expanded .row-pair .cell-content-new::before { content: "+"; color: var(--ok); }
+.symbol-expanded .row-del .cell-content-old::before,
+.symbol-expanded .row-pair .cell-content-old::before { content: "−"; color: var(--err); }
+.hunk.other-theme .hunk-header.other-theme-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.other-theme-header > .chevron { margin-top: 0; align-self: center; flex-shrink: 0; }
+.other-theme-header .hunk-intent {
+  color: var(--fg-muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.other-theme-label { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+.hunk.other-theme .diff .row-ins .cell-content-new,
+.hunk.other-theme .diff .row-pair .cell-content-new { background: rgba(63, 185, 80, 0.07); }
+.hunk.other-theme .diff .row-del .cell-content-old,
+.hunk.other-theme .diff .row-pair .cell-content-old { background: rgba(248, 81, 73, 0.07); }
+@media (prefers-color-scheme: light) {
+  .hunk.other-theme .diff .row-ins .cell-content-new,
+  .hunk.other-theme .diff .row-pair .cell-content-new { background: rgba(26, 127, 55, 0.04); }
+  .hunk.other-theme .diff .row-del .cell-content-old,
+  .hunk.other-theme .diff .row-pair .cell-content-old { background: rgba(207, 34, 46, 0.04); }
+}
+.symbol-context-status {
+  color: var(--fg-dim);
+  background: none;
+  border: 0;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
 /* Flat, inline annotation — no filled panel bar. The `@@` position +
  * intent prose read on the hunk's own surface; a thin dashed rule (only
  * when a body follows) separates annotation from code, matching the

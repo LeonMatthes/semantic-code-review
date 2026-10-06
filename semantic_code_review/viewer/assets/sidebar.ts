@@ -506,10 +506,10 @@ function activeHunkIds(): Set<string> | null {
  *  themes arrive. "No group claimed this" is only information against
  *  hunks some group did claim; marking every hunk in the diff turns a
  *  tell into wallpaper. */
-function applyFilter(): void {
+function applyFilter(root: ParentNode = document): void {
   const filtered = _activePill !== null;
   const grouped = THEMES_AXIS.groups.length > 0;
-  document.querySelectorAll<HTMLElement>(".hunk").forEach((hunkEl) => {
+  root.querySelectorAll<HTMLElement>(".hunk").forEach((hunkEl) => {
     const hid = hunkEl.dataset.id || "";
     const inAnyGroup = (THEMES_AXIS.hunkCount[hid] || 0) > 0;
     hunkEl.classList.toggle("ungrouped", grouped && !filtered && !inAnyGroup);
@@ -626,4 +626,5 @@ export const Sidebar = {
   setActivePill,
   applyFilter,
   activeHunkIds,
+  activeTheme: () => _activePill?.axis === "themes",
 };

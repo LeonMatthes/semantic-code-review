@@ -81,5 +81,5 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
-export const FileTextCache = { init, cached, load, splitLines };
+export const FileTextCache = { init, cached, load, splitLines, forget: (fileId: string) => { delete _cache[fileId]; } };
 export type { FileText };

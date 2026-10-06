@@ -39,5 +39,6 @@ class Symbol(BaseModel):
     name: str
     qualified_name: str
     range: SymbolRange
+    context_range: SymbolRange | None = Field(default=None, exclude=True)
     signature: str | None = None
     children: list[Symbol] = Field(default_factory=list)

@@ -29,6 +29,7 @@ import { Explainer } from "./explainer";
 import { ExplainerPanel, type PanelHost } from "./explainer_panel";
 import { FileRows } from "./file_rows";
 import { FileTextCache, type FileText } from "./file_text";
+import { symbolContextRows, SymbolSourceUnavailable, type ContextRow } from "./symbol_context";
 import { Folds, type FoldLabels } from "./folds";
 import { Prefs } from "./prefs";
 import { Progress } from "./progress";
@@ -171,6 +172,16 @@ const _panelScope: PaneScope = {
 // expand, a summary landing from another tab, the comment store
 // changing. A node is in one pane, so this is the pane's ledger.
 const _FILE_LEDGER = new WeakMap<HTMLElement, Ledger>();
+const _HUNK_ROWS = new WeakMap<HTMLElement, RowBlock[]>();
+const _symbolFailures = new Set<string>();
+const _deferredRefreshes = new WeakMap<HTMLElement, { file: FileBlock; scope: PaneScope }>();
+let _pendingNavigation: {
+  file: string; target: string; thread: ThreadSummary | null; ledger: Ledger; block: ScrollLogicalPosition;
+} | null = null;
+
+function _clearFileNavigation(file: string, ledger: Ledger): void {
+  if (_pendingNavigation?.file === file && _pendingNavigation.ledger === ledger) _pendingNavigation = null;
+}
 
 function _ledgerOf(fileEl: HTMLElement): Ledger {
   const ledger = _FILE_LEDGER.get(fileEl);
@@ -193,6 +204,8 @@ function renderInit(data: ViewerData): void {
   _smells = data.smells_catalogue || {};
   _explainerEnabled = data.explainer === true;
   _initialised = true;
+  _symbolFailures.clear();
+  _pendingNavigation = null;
   _state.fold = "hunks";
   _state.mode = _initialMode();
   _state.overrides = Object.create(null);
@@ -281,7 +294,11 @@ function renderHunkReplace(file: FileBlock, hunkIdx: number): void {
   // (header-less .hunk wrappers), not the normal hunk layout — a
   // surgical swap would inject a full hunk header. Fall back to a full
   // re-render, which rebuilds the focused body correctly.
-  if (Sidebar.activeHunkIds() !== null) { render(); return; }
+  const fileElement = document.querySelector<HTMLElement>('.file[data-id="' + _cssEscape(file.id) + '"]');
+  if (fileElement && (Sidebar.activeHunkIds() !== null || fileElement.querySelector(".symbol-expanded"))) {
+    _refreshFile(fileElement, file, _diffScope());
+    return;
+  }
   const fresh = _renderHunk(h, file, _diffScope());
   const existing = document.querySelector(
     '.hunk[data-id="' + _cssEscape(h.id) + '"]',
@@ -297,20 +314,24 @@ function renderHunkReplace(file: FileBlock, hunkIdx: number): void {
  *  Skipped in overview mode, for the reason renderHunkReplace is. */
 function repaintHunkHeader(hunkId: string): void {
   if (_state.mode === "overview") return;
-  const node = document.querySelector(
+  const nodes = document.querySelectorAll<HTMLElement>(
     '.hunk[data-id="' + _cssEscape(hunkId) + '"]',
   );
-  if (!node) return;
-  const oldHdr = node.querySelector(".hunk-header");
-  if (!oldHdr) return;
+  if (!nodes.length) return;
   const parts = hunkId.replace("H", "").split("_").map(Number);
   const [fi, hi] = parts;
   const f = _data.files && _data.files[fi];
   const h = f && f.hunks && f.hunks[hi];
   if (!h) return;
   const scope = _diffScope();
-  const fresh = _renderHunkHeader(h, _hunkFolded(scope, h), f, scope);
-  oldHdr.replaceWith(fresh);
+  for (const node of nodes) {
+    const oldHeader = node.querySelector(".hunk-header");
+    if (!oldHeader) continue;
+    const contextHunk = node.classList.contains("context-hunk");
+    const folded = contextHunk ? _isFolded(scope, h.id, false) : _hunkFolded(scope, h);
+    const fresh = _renderHunkHeader(h, folded, f, scope, node.classList.contains("other-theme"), contextHunk);
+    oldHeader.replaceWith(fresh);
+  }
 }
 
 /** Drop the cached `.diff` element for a hunk. Called by SSE
@@ -408,6 +429,7 @@ function setMode(mode: ViewMode): void {
   if (mode === "overview" && !_explainerEnabled) return;
   if (_state.mode === mode) return;
   _state.mode = mode;
+  _pendingNavigation = null;
   // Entering the mode clears the focus, as the slider does: it belongs
   // to a gesture the reviewer is stepping away from, and must not
   // survive the round trip.
@@ -427,8 +449,13 @@ function mode(): ViewMode {
 function _focus(hunkIds: Iterable<string>, scrollTo: string): void {
   setMode("diff");
   _state.focus = new Set(hunkIds);
+  const file = _data.files.find((file) => file.id === scrollTo || file.hunks.some((hunk) => hunk.id === scrollTo));
+  const navigation: typeof _pendingNavigation = file
+    ? { file: file.id, target: scrollTo, thread: null, ledger: ViewState, block: "start" } : null;
+  _pendingNavigation = navigation;
   render();
-  const el = document.querySelector('[data-id="' + _cssEscape(scrollTo) + '"]');
+  const fileElement = file && document.querySelector<HTMLElement>(`.file[data-id="${_cssEscape(file.id)}"]`);
+  const el = fileElement && navigation && _navigationTarget(fileElement, navigation);
   if (el) el.scrollIntoView({ block: "start" });
 }
 
@@ -487,6 +514,7 @@ function openReference(ref: ExplainerRef): void {
   overrides[file.id] = false;
   if (ref.kind === "hunk") overrides[ref.id] = false;
   _panelScope.overrides = overrides;
+  _pendingNavigation = { file: file.id, target: ref.id, thread: null, ledger: _panelScope.ledger, block: "nearest" };
   ExplainerPanel.open(ref);
 }
 
@@ -495,6 +523,7 @@ function openReference(ref: ExplainerRef): void {
  *  their code; "show all" (no pill) clears it. Boot wires this to the
  *  sidebar's onFilterChange. */
 function applyFilterChange(): void {
+  _pendingNavigation = null;
   _state.focus = Sidebar.activeHunkIds();
   render();
 }
@@ -659,6 +688,49 @@ function _renderFile(f: FileBlock, scope: PaneScope): HTMLElement | null {
 function _renderFileBody(
   body: HTMLElement, f: FileBlock, liveIds: Set<string> | null, scope: PaneScope,
 ): void {
+  const openIds = new Set(f.hunks.filter((hunk) => !_hunkFolded(scope, hunk)).map((hunk) => hunk.id));
+  const needsSymbols = Object.keys(f.symbol_context || {}).some(
+    (id) => openIds.has(id) && (liveIds === null || liveIds.has(id)),
+  );
+  if (needsSymbols) {
+    const text = FileTextCache.cached(f.id);
+    let stream: ContextRow[] | undefined;
+    if (text) {
+      try {
+        stream = symbolContextRows(f, text, liveIds, openIds);
+      } catch (error) {
+        if (!(error instanceof SymbolSourceUnavailable)) throw error;
+        _symbolFailures.add(f.id);
+      }
+    }
+    if (stream) {
+      _renderSymbolFileBody(body, f, stream, liveIds, scope);
+      return;
+    }
+    const failed = _symbolFailures.has(f.id);
+    if (failed) _clearFileNavigation(f.id, scope.ledger);
+    const loading = _el("button", "symbol-context-status", failed
+      ? "Symbol context unavailable · retry" : "Loading symbol context…") as HTMLButtonElement;
+    body.appendChild(loading);
+    const load = (): void => {
+      FileTextCache.forget(f.id);
+      _symbolFailures.delete(f.id);
+      loading.disabled = true;
+      loading.textContent = "Loading symbol context…";
+      FileTextCache.load(f).then(() => {
+        if (!loading.isConnected) return;
+        const existing = loading.closest<HTMLElement>(".file");
+        if (existing) _refreshFile(existing, f, scope);
+      }, () => {
+        _symbolFailures.add(f.id);
+        _clearFileNavigation(f.id, scope.ledger);
+        loading.disabled = false;
+        loading.textContent = "Symbol context unavailable · retry";
+      });
+    };
+    loading.addEventListener("click", load);
+    if (!text && !failed) load();
+  }
   const isLive = (h: HunkBlock): boolean => liveIds === null || liveIds.has(h.id);
   let curNew = 1;
   let curOld = 1;
@@ -681,6 +753,124 @@ function _renderFileBody(
     curOld = h.old_start + h.old_count;
   }
   flush(f.head_line_count, "bottom");
+}
+
+function _refreshFile(existing: HTMLElement, file: FileBlock, scope: PaneScope): void {
+  if (existing.querySelector(".annot-editor")) {
+    const pending = _deferredRefreshes.get(existing);
+    if (pending) {
+      pending.file = file;
+      pending.scope = scope;
+      return;
+    }
+    const deferred = { file, scope };
+    _deferredRefreshes.set(existing, deferred);
+    const observer = new MutationObserver(() => {
+      if (existing.isConnected && existing.querySelector(".annot-editor")) return;
+      observer.disconnect();
+      _deferredRefreshes.delete(existing);
+      if (existing.isConnected) _refreshFile(existing, deferred.file, deferred.scope);
+    });
+    observer.observe(existing, { childList: true, subtree: true });
+    return;
+  }
+  const viewport = existing.closest<HTMLElement>(".explainer-detail-body");
+  const viewportTop = viewport?.getBoundingClientRect().top ?? 0;
+  const viewportBottom = viewport?.getBoundingClientRect().bottom ?? window.innerHeight;
+  const root = viewport ?? document.getElementById("app")!;
+  const anchor = Array.from(root.querySelectorAll<HTMLElement>(".cell-lineno:not(.empty)")).find((cell) => {
+    const row = cell.closest<HTMLElement>(".row");
+    const bounds = row?.getBoundingClientRect();
+    return row?.style.display !== "none" && bounds && bounds.bottom > viewportTop && bounds.top < viewportBottom;
+  });
+  const anchorFile = anchor?.closest<HTMLElement>(".file")?.dataset.id;
+  const anchorSide = anchor?.classList.contains("cell-lineno-old") ? "old" : "new";
+  const anchorLine = anchor?.textContent;
+  const anchorTop = anchor?.closest<HTMLElement>(".row")?.getBoundingClientRect().top;
+  const fresh = _renderFile(file, scope);
+  if (!fresh) return;
+  existing.replaceWith(fresh);
+  if (scope.filtered) Sidebar.applyFilter(fresh);
+  Comments.renderAll([fresh]);
+  Annotations.reflowAll();
+  if (anchorFile && anchorTop !== undefined) {
+    const fileElement = root.querySelector<HTMLElement>(`.file[data-id="${_cssEscape(anchorFile)}"]`);
+    const restored = Array.from(fileElement?.querySelectorAll<HTMLElement>(`.cell-lineno-${anchorSide}`) ?? [])
+      .find((cell) => cell.textContent === anchorLine);
+    const restoredTop = restored?.closest<HTMLElement>(".row")?.getBoundingClientRect().top;
+    if (restoredTop !== undefined) {
+      const scroller = viewport ?? document.scrollingElement ?? document.documentElement;
+      scroller.scrollTop += restoredTop - anchorTop;
+    }
+  }
+  if (_pendingNavigation?.file === file.id && _pendingNavigation.ledger === scope.ledger) {
+    const target = _navigationTarget(fresh, _pendingNavigation);
+    if (target && viewport) viewport.scrollTop += target.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+    else target?.scrollIntoView({ block: _pendingNavigation.block });
+    if (!fresh.querySelector(".symbol-context-status")) _pendingNavigation = null;
+  }
+}
+
+function _navigationTarget(file: HTMLElement, navigation: NonNullable<typeof _pendingNavigation>): HTMLElement | null {
+  if (navigation.thread) return _threadTarget(file, navigation.thread);
+  if (navigation.target === file.dataset.id) return file;
+  const selector = `.hunk[data-id="${_cssEscape(navigation.target)}"]`;
+  return file.querySelector<HTMLElement>(selector + ":not(.folded)") ?? file.querySelector<HTMLElement>(selector);
+}
+
+function _renderSymbolFileBody(
+  body: HTMLElement, file: FileBlock, stream: ContextRow[], liveIds: Set<string> | null, scope: PaneScope,
+): void {
+  body.classList.add("symbol-expanded");
+  let first = 0;
+  while (first < stream.length) {
+    const visible = stream[first].visible;
+    let last = first + 1;
+    while (last < stream.length && stream[last].visible === visible) last++;
+    const pieces = stream.slice(first, last);
+    if (visible) {
+      _renderSymbolPieces(body, file, pieces, liveIds, scope);
+    } else {
+      const before = first === 0 ? { oldNext: 1, newNext: 1 } : stream[first - 1];
+      const after = stream[last - 1];
+      const region: DiffRegion = {
+        position: first === 0 ? "top" : last === stream.length ? "bottom" : "between",
+        oldStart: before.oldNext, newStart: before.newNext, newEnd: after.newNext - 1,
+        demoted: [], pieces, liveIds,
+        ref: { old: [before.oldNext, after.oldNext - 1], new: [before.newNext, after.newNext - 1] },
+      };
+      body.appendChild(_renderRegion(file, region, scope));
+    }
+    first = last;
+  }
+}
+
+function _renderSymbolPieces(
+  parent: HTMLElement, file: FileBlock, pieces: ContextRow[], liveIds: Set<string> | null, scope: PaneScope,
+): void {
+  let first = 0;
+  while (first < pieces.length) {
+    const hunk = pieces[first].hunk;
+    const baselineFolded = hunk !== null && _hunkFolded(scope, hunk)
+      && !Object.prototype.hasOwnProperty.call(scope.overrides, hunk.id);
+    let last = first + 1;
+    while (last < pieces.length && pieces[last].hunk === hunk
+      && (!baselineFolded || pieces[last].required === pieces[first].required)) last++;
+    const rows = pieces.slice(first, last).map((piece) => piece.row);
+    const selected = hunk !== null && (liveIds === null || liveIds.has(hunk.id));
+    const hasChanges = rows.some((row) => row.kind !== "ctx");
+    const required = pieces.slice(first, last).some((piece) => piece.required);
+    if (hunk && ((selected && !(baselineFolded && required)) || hasChanges)) {
+      parent.appendChild(_renderHunk(hunk, file, scope, rows, !selected, required));
+    } else {
+      const container = _el("div", "gap-expansion symbol-context");
+      const rendered = _renderDiffRows(file, rows, _blockMarks(rows));
+      FileRows.record(container, { rows, oldEls: rendered.oldEls, newEls: rendered.newEls });
+      container.appendChild(rendered.diff);
+      parent.appendChild(container);
+    }
+    first = last;
+  }
 }
 
 function _renderFileHeader(f: FileBlock, folded: boolean, scope: PaneScope): HTMLElement {
@@ -755,6 +945,9 @@ function _renderFileOverview(f: FileBlock): HTMLElement | null {
 // first time a reviewer asks for any of it, whatever the file's size.
 
 interface DiffRegion {
+  pieces?: ContextRow[];
+  liveIds?: Set<string> | null;
+  ref?: RegionRef;
   position: "top" | "between" | "bottom";
   /** The region's first line, per side. The two advance together over
    *  unchanged context; a demoted hunk resets them to its own end. */
@@ -792,6 +985,7 @@ function _walkRegion(
 }
 
 function _regionCount(region: DiffRegion): number {
+  if (region.pieces) return region.pieces.length;
   let n = 0;
   _walkRegion(region, () => { n++; }, (h) => { n += (h.rows || []).length; });
   return n;
@@ -804,6 +998,7 @@ function _regionCount(region: DiffRegion): number {
  *  other boundaries, and a reveal recorded under it is left where it
  *  is until that filter is back. */
 function _regionRef(region: DiffRegion): RegionRef {
+  if (region.ref) return region.ref;
   const end = _walkRegion(region, () => {}, () => {});
   return { old: [region.oldStart, end.oldNext - 1], new: [region.newStart, end.newNext - 1] };
 }
@@ -927,7 +1122,6 @@ function _renderRegionChip(
 function _renderRegionExpansion(
   f: FileBlock, region: DiffRegion, text: FileText, scope: PaneScope,
 ): HTMLElement {
-  const { rows, marks } = _regionRows(f, region, text);
   const container = _el("div", "gap-expansion");
   const collapse = _el("button", "gap-collapse", "× collapse");
   collapse.title = "Hide these lines again";
@@ -938,6 +1132,11 @@ function _renderRegionExpansion(
     _refreshFileFolds(chip, f);
   });
   container.appendChild(collapse);
+  if (region.pieces) {
+    _renderSymbolPieces(container, f, region.pieces, region.liveIds ?? null, scope);
+    return container;
+  }
+  const { rows, marks } = _regionRows(f, region, text);
   const { diff, oldEls, newEls } = _renderDiffRows(f, rows, marks);
   // The file-level fold walker (folds.ts) recovers the row stream + DOM
   // elements from the container.
@@ -1006,17 +1205,26 @@ function _refreshFileFolds(el: HTMLElement, f: FileBlock): void {
 
 // --- Hunk + diff body ---------------------------------------------------
 
-function _renderHunk(h: HunkBlock, f: FileBlock, scope: PaneScope): HTMLElement {
+function _renderHunk(
+  h: HunkBlock, f: FileBlock, scope: PaneScope, rows?: RowBlock[], outside = false, required = false,
+): HTMLElement {
   const div = _el("div", "hunk");
+  _HUNK_ROWS.set(div, rows ?? h.rows ?? []);
   div.dataset.id = h.id;
-  const folded = _hunkFolded(scope, h);
+  const contextHunk = outside || (required && _hunkBaseline(scope, h)
+    && !Object.prototype.hasOwnProperty.call(scope.overrides, h.id));
+  const folded = contextHunk ? _isFolded(scope, h.id, false) : _hunkFolded(scope, h);
+  const theme = scope.filtered && Sidebar.activeTheme();
+  div.classList.toggle("selected-theme", theme && !outside);
+  div.classList.toggle("other-theme", theme && outside);
+  div.classList.toggle("context-hunk", contextHunk);
   div.classList.toggle("folded", folded);
-  div.appendChild(_renderHunkHeader(h, folded, f, scope));
+  div.appendChild(_renderHunkHeader(h, folded, f, scope, theme && outside, contextHunk));
   if (folded) {
-    const manifest = _renderCommentManifest(_hunkThreads(h, f), (t) => _revealThread(f, t, scope));
+    const manifest = _renderCommentManifest(_hunkThreads(rows ?? h.rows ?? [], f), (t) => _revealThread(f, t, scope));
     if (manifest) div.appendChild(manifest);
   } else {
-    div.appendChild(_renderHunkDiff(h, f, scope));
+    div.appendChild(_renderHunkDiff(h, f, scope, rows));
     if (h.context) {
       const c = _el("div", "context-note");
       c.innerHTML = `<strong>context:</strong> ${_esc(h.context)}`;
@@ -1057,8 +1265,19 @@ function _buildRefLink(ref: Ref): HTMLElement {
 }
 
 function _renderHunkHeader(
-  h: HunkBlock, folded: boolean, f: FileBlock, scope: PaneScope,
+  h: HunkBlock, folded: boolean, f: FileBlock, scope: PaneScope, otherTheme = false, contextHunk = false,
 ): HTMLElement {
+  if (otherTheme) {
+    const header = _el("div", "hunk-header other-theme-header");
+    header.appendChild(_chev(folded));
+    header.appendChild(_el("span", "hunk-intent", h.intent || "Change outside the selected theme"));
+    header.appendChild(_el("span", "other-theme-label", "Other theme"));
+    header.addEventListener("click", (event) => {
+      event.stopPropagation();
+      _toggleFold(scope, h.id, false);
+    });
+    return header;
+  }
   const hdr = _el("div", "hunk-header");
   hdr.appendChild(_chev(folded));
   hdr.appendChild(_el("span", "hunk-pos", h.header));
@@ -1094,7 +1313,7 @@ function _renderHunkHeader(
   hdr.appendChild(meta);
   hdr.addEventListener("click", (e) => {
     e.stopPropagation();
-    _toggleFold(scope, h.id, _hunkBaseline(scope, h));
+    _toggleFold(scope, h.id, contextHunk ? false : _hunkBaseline(scope, h));
   });
   return hdr;
 }
@@ -1310,8 +1529,7 @@ function _threadTarget(pane: ParentNode, thread: ThreadSummary): HTMLElement | n
 // rendered when there are none.
 
 /** The threads on a hunk's rows, either side, in row order. */
-function _hunkThreads(h: HunkBlock, f: FileBlock): ThreadSummary[] {
-  const rows = h.rows || [];
+function _hunkThreads(rows: RowBlock[], f: FileBlock): ThreadSummary[] {
   const placed: { thread: ThreadSummary; idx: number }[] = [];
   for (const thread of Comments.threadsFor(f.path)) {
     const idx = rows.findIndex((r) => _rowCarries(r, thread));
@@ -1337,6 +1555,7 @@ function _revealThread(f: FileBlock, thread: ThreadSummary, scope: PaneScope): v
   scope.overrides[f.id] = false;
   const hunk = f.hunks.find((h) => (h.rows || []).some((r) => _rowCarries(r, thread)));
   if (hunk) scope.overrides[hunk.id] = false;
+  _pendingNavigation = { file: f.id, target: f.id, thread, ledger: scope.ledger, block: "nearest" };
   scope.repaint();
   // One pane holds `.file` nodes at a time: the panel's in overview mode,
   // the diff's otherwise.
@@ -1380,7 +1599,7 @@ function refreshCommentManifests(): void {
       const h = f.hunks.find((x) => x.id === hunkEl.dataset.id);
       if (!h) throw new Error(`no hunk ${hunkEl.dataset.id} in ${f.id}`);
       _replaceManifest(hunkEl, ".hunk-header", hunkEl.classList.contains("folded")
-        ? _renderCommentManifest(_hunkThreads(h, f), (t) => _revealThread(f, t, scope)) : null);
+        ? _renderCommentManifest(_hunkThreads(_HUNK_ROWS.get(hunkEl) ?? h.rows ?? [], f), (t) => _revealThread(f, t, scope)) : null);
     }
     attachFileFolds(fileEl, f);
   }
@@ -1414,7 +1633,9 @@ function _foldLabels(f: FileBlock): FoldLabels {
         side === "new" ? bodyRows[node.first].newEl : bodyRows[node.first].oldEl;
       let target: HTMLElement | null;
       if (node.kind === "span") {
-        target = pane.querySelector<HTMLElement>(`.span-text[data-span-id="${_cssEscape(node.span.id)}"]`);
+        const selector = `.span-text[data-span-id="${_cssEscape(node.span.id)}"]`;
+        target = rowOf("new").closest(".diff")?.querySelector<HTMLElement>(selector)
+          ?? pane.querySelector<HTMLElement>(selector);
       } else if (node.kind === "comment") {
         target = _threadTarget(pane, node.thread) ?? rowOf(node.thread.side);
       } else {
@@ -1438,17 +1659,20 @@ function attachFileFolds(fileEl: HTMLElement, f: FileBlock): void {
   });
 }
 
-function _renderHunkDiff(h: HunkBlock, file: FileBlock, scope: PaneScope): HTMLElement {
-  const cached = scope.cache?.[h.id];
+function _renderHunkDiff(h: HunkBlock, file: FileBlock, scope: PaneScope, selectedRows?: RowBlock[]): HTMLElement {
+  const cached = selectedRows ? undefined : scope.cache?.[h.id];
   if (cached) return cached;
-  const rows = h.rows || [];
+  const rows = selectedRows ?? h.rows ?? [];
   const marks = _blockMarks(rows);
   const { diff, oldEls, newEls } = _renderDiffRows(file, rows, marks);
-  _attachSpans(newEls, rows, h.spans || [], h.id, file.path);
+  const spans = selectedRows ? (h.spans || []).filter((span) =>
+    rows.some((row) => row.new_line !== null && row.new_line >= span.start && row.new_line <= span.end),
+  ) : h.spans || [];
+  _attachSpans(newEls, rows, spans, h.id, file.path);
   // Record this hunk's rows so folds.ts can build a unified row stream
   // across the hunk and adjacent expanded context.
   FileRows.record(diff, { rows, oldEls, newEls });
-  if (scope.cache) scope.cache[h.id] = diff;
+  if (scope.cache && !selectedRows) scope.cache[h.id] = diff;
   return diff;
 }
 
@@ -2318,6 +2542,7 @@ function _restoreHash(): void {
 }
 
 function _onKeydown(e: KeyboardEvent): void {
+  _pendingNavigation = null;
   const target = e.target as HTMLElement | null;
   const tag = ((target && target.tagName) || "").toLowerCase();
   if (tag === "input" || tag === "textarea") return;
@@ -2362,6 +2587,9 @@ function _closeHelp(): void {
 }
 
 function _wireInputs(): void {
+  for (const event of ["pointerdown", "wheel"]) {
+    document.addEventListener(event, () => { _pendingNavigation = null; }, { passive: true });
+  }
   document.querySelectorAll(".fold-slider button").forEach((b) => {
     const btn = b as HTMLElement;
     btn.addEventListener("click", () => {

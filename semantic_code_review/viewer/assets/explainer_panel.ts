@@ -210,9 +210,8 @@ function repaint(): void {
  *  including the page — which would move the reader's place in the
  *  document, the one thing opening beside it is for. */
 function _scrollToHunk(dom: PanelDom, hunkId: string): void {
-  const hunk = dom.body.querySelector(
-    '.hunk[data-id="' + _cssEscape(hunkId) + '"]',
-  ) as HTMLElement | null;
+  const selector = '.hunk[data-id="' + _cssEscape(hunkId) + '"]';
+  const hunk = dom.body.querySelector(selector + ':not(.folded)') ?? dom.body.querySelector(selector);
   if (!hunk) return;
   dom.body.scrollTop +=
     hunk.getBoundingClientRect().top - dom.body.getBoundingClientRect().top;
