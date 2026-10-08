@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import threading
 import time
 import urllib.request
@@ -90,6 +91,21 @@ def _wait_in_background(server: ReviewServer, run_dir: paths.RunDir) -> tuple[th
     return t, result
 
 
+@pytest.fixture
+def record_codex_queue(monkeypatch):
+    def record(exit_code=0):
+        commands = []
+
+        def queue_command(arguments, *, check):
+            commands.append(arguments)
+            return subprocess.CompletedProcess(arguments, exit_code)
+
+        monkeypatch.setattr(stream.subprocess, "run", queue_command)
+        return commands
+
+    return record
+
+
 def test_a_send_lands_as_a_batch(server, run_dir: paths.RunDir) -> None:
     _post(server.url() + "/comments", {"id": "c1", "file": "a.py", "side": "new", "line": 3, "body": "why three?"})
     _post(server.url() + "/comments/c1/send")
@@ -104,6 +120,103 @@ def test_a_send_lands_as_a_batch(server, run_dir: paths.RunDir) -> None:
     assert "> why three?" in out
     assert "> 3 | three" in out
     assert {c.id: c.delivery for c in CommentStore(run_dir.comments).all()} == {"c1": "delivered"}
+
+
+@pytest.mark.parametrize("queue_exit_code", [0, 7])
+def test_codex_wait_queues_a_batch_and_returns_the_command_exit_code(
+    server, run_dir, record_codex_queue, queue_exit_code
+):
+    body = 'Why "three"? Keep $(this) and `that` literal.\nA second line.'
+    _post(server.url() + "/comments", {"id": "c1", "file": "a.py", "side": "new", "line": 3, "body": body})
+    _post(server.url() + "/comments/c1/send")
+    commands = record_codex_queue(queue_exit_code)
+    result = CliRunner().invoke(
+        app,
+        [
+            "review",
+            "--wait",
+            run_dir.slug,
+            "--runs-root",
+            str(run_dir.path.parent),
+            "--codex-thread",
+            "thread-123",
+            "--codex-command",
+            "/app with spaces/codex",
+        ],
+    )
+
+    assert result.exit_code == queue_exit_code
+    assert result.stdout == ""
+    assert len(commands) == 1
+    assert commands[0][:-1] == ["/app with spaces/codex", "queue", "--thread", "thread-123", "--message"]
+    message = commands[0][-1]
+    assert message.startswith(f"status: batch\n# Batch 1 for {run_dir.slug}\n")
+    assert '> Why "three"? Keep $(this) and `that` literal.' in message
+    assert "> A second line." in message
+    assert "> 3 | three" in message
+    assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
+
+
+def test_codex_wait_renews_empty_polls_before_queueing(server, run_dir, monkeypatch, record_codex_queue, capsys):
+    responses = iter(
+        [
+            {"status": "nothing-yet"},
+            {"status": "nothing-yet"},
+            {"status": "batch", "batch_no": 1, "entries": []},
+        ]
+    )
+
+    def poll_wait(info, *, timeout):
+        return next(responses)
+
+    monkeypatch.setattr(stream, "_poll_wait", poll_wait)
+    commands = record_codex_queue()
+
+    assert stream.run_codex_wait(run_dir, timeout=5, codex_thread="thread-123", codex_command="codex") == 0
+    assert len(commands) == 1
+    assert commands[0][-1].startswith("status: batch\n")
+    assert "nothing-yet" not in commands[0][-1]
+    assert capsys.readouterr().out == ""
+
+
+def test_codex_wait_queues_remaining_comments_when_the_review_ends(run_dir, record_codex_queue):
+    store = CommentStore(run_dir.comments)
+    store.upsert({"id": "draft", "file": "a.py", "side": "new", "line": 1, "body": "remaining feedback"})
+    commands = record_codex_queue()
+
+    assert stream.run_codex_wait(run_dir, timeout=5, codex_thread="thread-123", codex_command="codex") == 0
+    assert len(commands) == 1
+    assert commands[0][-1].startswith("status: ended\n")
+    assert "> remaining feedback" in commands[0][-1]
+    assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
+
+
+def test_codex_wait_reports_a_missing_executable_without_changing_delivery(server, run_dir, tmp_path, capsys):
+    _post(server.url() + "/comments", {"id": "c1", "file": "a.py", "side": "new", "line": 1, "body": "now"})
+    _post(server.url() + "/comments/c1/send")
+
+    assert (
+        stream.run_codex_wait(
+            run_dir, timeout=5, codex_thread="thread-123", codex_command=str(tmp_path / "missing-codex")
+        )
+        == 2
+    )
+    assert "could not execute" in capsys.readouterr().err
+    assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--wait", "unknown", "--codex-thread", "thread-123"],
+        ["--wait", "unknown", "--codex-command", "codex"],
+        ["HEAD", "--codex-thread", "thread-123", "--codex-command", "codex"],
+    ],
+)
+def test_codex_options_require_each_other_and_wait(arguments):
+    result = CliRunner().invoke(app, ["review", *arguments])
+    assert result.exit_code == 2
+    assert "must be used together with --wait" in result.stderr
 
 
 def test_a_send_all_is_one_batch_and_a_later_send_the_next(server, run_dir: paths.RunDir) -> None:

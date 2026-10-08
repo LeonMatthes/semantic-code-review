@@ -113,6 +113,12 @@ def review(
         "--wait-timeout",
         help="Seconds a --wait blocks before answering `nothing-yet`.",
     ),
+    codex_thread: str = typer.Option(
+        None, "--codex-thread", help="With --wait, queue the result to this Codex thread instead of stdout."
+    ),
+    codex_command: str = typer.Option(
+        None, "--codex-command", help="Codex executable name or path; required with --codex-thread."
+    ),
     foreground: bool = typer.Option(
         False,
         runner.FOREGROUND_FLAG,
@@ -131,8 +137,23 @@ def review(
     """
     configure_logging(verbose or foreground)
 
+    if (codex_thread is not None or codex_command is not None) and (
+        wait is None or codex_thread is None or codex_command is None
+    ):
+        typer.echo("scr review: --codex-thread and --codex-command must be used together with --wait", err=True)
+        raise typer.Exit(code=2)
+
     runs_root = runs_root or default_runs_root()
     if wait is not None:
+        if codex_thread is not None and codex_command is not None:
+            raise typer.Exit(
+                code=stream.run_codex_wait(
+                    paths.RunDir(runs_root / wait),
+                    timeout=wait_timeout,
+                    codex_thread=codex_thread,
+                    codex_command=codex_command,
+                )
+            )
         raise typer.Exit(code=stream.run_wait(paths.RunDir(runs_root / wait), timeout=wait_timeout))
     if spec is None and serve_run is None:
         typer.echo("scr review: give a git ref or range to review", err=True)

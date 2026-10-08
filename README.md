@@ -218,6 +218,12 @@ The three commands you'll actually use:
   prints `status: batch` and the batch as markdown, `status:
   nothing-yet`, or `status: ended` with the comments never sent. Exit 0
   for all three, 2 for an unknown run id.
+- `scr review --wait <run_id> --codex-thread <thread_id> --codex-command <executable>`
+  — renew empty waits silently, then send the batch or final review output
+  through `<executable> queue --thread <thread_id> --message <output>` and exit.
+  Both Codex options are required together. The executable can be an absolute
+  path when the desktop app's bundled CLI is not on PATH. Delivery semantics
+  are the same as the stdout mode; the command's exit code is returned.
 - `scr comment reply <run_id> <comment_id> [BODY]`, `scr comment
   resolve|unresolve <run_id> <comment_id>` — answer into a live
   review's thread, or settle it.
