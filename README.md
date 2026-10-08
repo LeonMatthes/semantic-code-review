@@ -221,6 +221,7 @@ The three commands you'll actually use:
 - `scr review --wait <run_id> --codex-thread <thread_id> --codex-command <executable>`
   — send the batch, timeout, or final review output
   through `<executable> queue --thread <thread_id> --message <output>` and exit.
+  Queued messages start with `scr review --wait output:`.
   Both Codex options are required together. The executable can be an absolute
   path when the desktop app's bundled CLI is not on PATH. Delivery semantics
   are the same as the stdout mode; the command's exit code is returned.

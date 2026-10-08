@@ -150,9 +150,10 @@ def review(
         output = io.StringIO() if codex_thread is not None else None
         code = stream.run_wait(paths.RunDir(runs_root / wait), timeout=wait_timeout, out=output)
         if output is not None and code == 0:
+            message = f"scr review --wait output:\n{output.getvalue()}"
             try:
                 code = subprocess.run(
-                    [codex_command, "queue", "--thread", codex_thread, "--message", output.getvalue()], check=False
+                    [codex_command, "queue", "--thread", codex_thread, "--message", message], check=False
                 ).returncode
             except OSError as error:
                 typer.echo(f"scr review --wait: could not execute {codex_command!r}: {error}", err=True)

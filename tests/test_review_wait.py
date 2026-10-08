@@ -156,7 +156,7 @@ def test_codex_wait_queues_a_batch_and_returns_the_command_exit_code(
     assert len(commands) == 1
     assert commands[0][:-1] == ["/app with spaces/codex", "queue", "--thread", "thread-123", "--message"]
     message = commands[0][-1]
-    assert message.startswith(f"status: batch\n# Batch 1 for {run_dir.slug}\n")
+    assert message.startswith(f"scr review --wait output:\nstatus: batch\n# Batch 1 for {run_dir.slug}\n")
     assert '> Why "three"? Keep $(this) and `that` literal.' in message
     assert "> A second line." in message
     assert "> 3 | three" in message
@@ -170,7 +170,7 @@ def test_codex_wait_queues_nothing_yet(server, run_dir, record_codex_queue):
 
     assert result.exit_code == 0
     assert len(commands) == 1
-    assert commands[0][-1].startswith("status: nothing-yet\n")
+    assert commands[0][-1].startswith("scr review --wait output:\nstatus: nothing-yet\n")
     assert result.stdout == ""
 
 
@@ -181,7 +181,7 @@ def test_codex_wait_queues_remaining_comments_when_the_review_ends(run_dir, reco
 
     assert _wait_with_codex(run_dir).exit_code == 0
     assert len(commands) == 1
-    assert commands[0][-1].startswith("status: ended\n")
+    assert commands[0][-1].startswith("scr review --wait output:\nstatus: ended\n")
     assert "> remaining feedback" in commands[0][-1]
     assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
 
