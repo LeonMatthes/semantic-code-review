@@ -213,13 +213,13 @@ The three commands you'll actually use:
   (`scr review e4e8f74 HEAD`, whole-tree) or two `rev:path` blobs
   (`scr review A:old.py B:new.py`, single-file; cross-path shows as a
   rename).
-- `scr review --wait <run_id>` — block (540 s by default,
+- `scr review --wait <run_id>` — block (1800 s / 30 minutes by default,
   `--wait-timeout`) for the next batch of comments the reviewer sends;
   prints `status: batch` and the batch as markdown, `status:
   nothing-yet`, or `status: ended` with the comments never sent. Exit 0
   for all three, 2 for an unknown run id.
 - `scr review --wait <run_id> --codex-thread <thread_id> --codex-command <executable>`
-  — renew empty waits silently, then send the batch or final review output
+  — send the batch, timeout, or final review output
   through `<executable> queue --thread <thread_id> --message <output>` and exit.
   Both Codex options are required together. The executable can be an absolute
   path when the desktop app's bundled CLI is not on PATH. Delivery semantics

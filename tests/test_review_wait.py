@@ -73,6 +73,25 @@ def _wait(run_dir: paths.RunDir, *, timeout: float = 5) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+def _wait_with_codex(run_dir, *, codex_command="codex", timeout=5):
+    return CliRunner().invoke(
+        app,
+        [
+            "review",
+            "--wait",
+            run_dir.slug,
+            "--runs-root",
+            str(run_dir.path.parent),
+            "--wait-timeout",
+            str(timeout),
+            "--codex-thread",
+            "thread-123",
+            "--codex-command",
+            codex_command,
+        ],
+    )
+
+
 def _wait_in_background(server: ReviewServer, run_dir: paths.RunDir) -> tuple[threading.Thread, dict]:
     """Start a `--wait` on a thread and return once it is attached."""
     result: dict = {}
@@ -100,7 +119,7 @@ def record_codex_queue(monkeypatch):
             commands.append(arguments)
             return subprocess.CompletedProcess(arguments, exit_code)
 
-        monkeypatch.setattr(stream.subprocess, "run", queue_command)
+        monkeypatch.setattr(subprocess, "run", queue_command)
         return commands
 
     return record
@@ -130,20 +149,7 @@ def test_codex_wait_queues_a_batch_and_returns_the_command_exit_code(
     _post(server.url() + "/comments", {"id": "c1", "file": "a.py", "side": "new", "line": 3, "body": body})
     _post(server.url() + "/comments/c1/send")
     commands = record_codex_queue(queue_exit_code)
-    result = CliRunner().invoke(
-        app,
-        [
-            "review",
-            "--wait",
-            run_dir.slug,
-            "--runs-root",
-            str(run_dir.path.parent),
-            "--codex-thread",
-            "thread-123",
-            "--codex-command",
-            "/app with spaces/codex",
-        ],
-    )
+    result = _wait_with_codex(run_dir, codex_command="/app with spaces/codex")
 
     assert result.exit_code == queue_exit_code
     assert result.stdout == ""
@@ -157,26 +163,15 @@ def test_codex_wait_queues_a_batch_and_returns_the_command_exit_code(
     assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
 
 
-def test_codex_wait_renews_empty_polls_before_queueing(server, run_dir, monkeypatch, record_codex_queue, capsys):
-    responses = iter(
-        [
-            {"status": "nothing-yet"},
-            {"status": "nothing-yet"},
-            {"status": "batch", "batch_no": 1, "entries": []},
-        ]
-    )
-
-    def poll_wait(info, *, timeout):
-        return next(responses)
-
-    monkeypatch.setattr(stream, "_poll_wait", poll_wait)
+def test_codex_wait_queues_nothing_yet(server, run_dir, record_codex_queue):
     commands = record_codex_queue()
 
-    assert stream.run_codex_wait(run_dir, timeout=5, codex_thread="thread-123", codex_command="codex") == 0
+    result = _wait_with_codex(run_dir, timeout=0)
+
+    assert result.exit_code == 0
     assert len(commands) == 1
-    assert commands[0][-1].startswith("status: batch\n")
-    assert "nothing-yet" not in commands[0][-1]
-    assert capsys.readouterr().out == ""
+    assert commands[0][-1].startswith("status: nothing-yet\n")
+    assert result.stdout == ""
 
 
 def test_codex_wait_queues_remaining_comments_when_the_review_ends(run_dir, record_codex_queue):
@@ -184,24 +179,20 @@ def test_codex_wait_queues_remaining_comments_when_the_review_ends(run_dir, reco
     store.upsert({"id": "draft", "file": "a.py", "side": "new", "line": 1, "body": "remaining feedback"})
     commands = record_codex_queue()
 
-    assert stream.run_codex_wait(run_dir, timeout=5, codex_thread="thread-123", codex_command="codex") == 0
+    assert _wait_with_codex(run_dir).exit_code == 0
     assert len(commands) == 1
     assert commands[0][-1].startswith("status: ended\n")
     assert "> remaining feedback" in commands[0][-1]
     assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
 
 
-def test_codex_wait_reports_a_missing_executable_without_changing_delivery(server, run_dir, tmp_path, capsys):
+def test_codex_wait_reports_a_missing_executable_without_changing_delivery(server, run_dir, tmp_path):
     _post(server.url() + "/comments", {"id": "c1", "file": "a.py", "side": "new", "line": 1, "body": "now"})
     _post(server.url() + "/comments/c1/send")
 
-    assert (
-        stream.run_codex_wait(
-            run_dir, timeout=5, codex_thread="thread-123", codex_command=str(tmp_path / "missing-codex")
-        )
-        == 2
-    )
-    assert "could not execute" in capsys.readouterr().err
+    result = _wait_with_codex(run_dir, codex_command=str(tmp_path / "missing-codex"))
+    assert result.exit_code == 2
+    assert "could not execute" in result.stderr
     assert CommentStore(run_dir.comments).all()[0].delivery == "delivered"
 
 

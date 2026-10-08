@@ -8,6 +8,8 @@ run and detaches the server, printing the run id; `scr review --serve-run
 
 from __future__ import annotations
 
+import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -145,16 +147,17 @@ def review(
 
     runs_root = runs_root or default_runs_root()
     if wait is not None:
-        if codex_thread is not None and codex_command is not None:
-            raise typer.Exit(
-                code=stream.run_codex_wait(
-                    paths.RunDir(runs_root / wait),
-                    timeout=wait_timeout,
-                    codex_thread=codex_thread,
-                    codex_command=codex_command,
-                )
-            )
-        raise typer.Exit(code=stream.run_wait(paths.RunDir(runs_root / wait), timeout=wait_timeout))
+        output = io.StringIO() if codex_thread is not None else None
+        code = stream.run_wait(paths.RunDir(runs_root / wait), timeout=wait_timeout, out=output)
+        if output is not None and code == 0:
+            try:
+                code = subprocess.run(
+                    [codex_command, "queue", "--thread", codex_thread, "--message", output.getvalue()], check=False
+                ).returncode
+            except OSError as error:
+                typer.echo(f"scr review --wait: could not execute {codex_command!r}: {error}", err=True)
+                code = 2
+        raise typer.Exit(code=code)
     if spec is None and serve_run is None:
         typer.echo("scr review: give a git ref or range to review", err=True)
         raise typer.Exit(code=2)

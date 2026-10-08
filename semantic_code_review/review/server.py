@@ -59,10 +59,7 @@ _CLOSE = object()
 #: to the session, which 404s on anything the document does not know.
 _EXPLAINER_SECTION_PREFIX = "/explainer/section/"
 
-#: `GET /wait` without a `timeout`: the same 540 s `scr review --wait`
-#: defaults to, under the Bash tool's 600 s cap. The cap bounds a client
-#: that asks for more.
-_WAIT_DEFAULT_TIMEOUT = 540.0
+_WAIT_DEFAULT_TIMEOUT = 1800.0
 _WAIT_MAX_TIMEOUT = 3600.0
 
 #: `POST /comments/<id>/<action>` — the lifecycle gestures on one comment.

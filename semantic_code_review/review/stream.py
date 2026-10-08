@@ -18,9 +18,7 @@ misbehaved.
 from __future__ import annotations
 
 import dataclasses
-import io
 import json
-import subprocess
 import sys
 import time
 import urllib.error
@@ -31,9 +29,7 @@ from typing import Any, TextIO
 from .. import paths
 from . import comments
 
-#: How long `--wait` blocks by default: under the Bash tool's 600 s cap,
-#: with room for the HTTP round trip.
-WAIT_TIMEOUT = 540
+WAIT_TIMEOUT = 1800
 
 #: Slack the client allows past the server-side timeout before it treats
 #: the socket as dead.
@@ -148,29 +144,6 @@ def run_wait(run_dir: paths.RunDir, *, timeout: float, out: TextIO | None = None
         out=sys.stdout if out is None else out,
         err=sys.stderr if err is None else err,
     )
-
-
-def run_codex_wait(run_dir: paths.RunDir, *, timeout: float, codex_thread: str, codex_command: str) -> int:
-    """Wait through empty polls, queue one batch or ended result to Codex, then exit.
-
-    Uses the same delivery semantics as `run_wait`. Returns its error code,
-    the Codex command's exit code, or 2 when the command cannot be executed.
-    """
-    while True:
-        output = io.StringIO()
-        code = run_wait(run_dir, timeout=timeout, out=output)
-        if code != 0:
-            return code
-        message = output.getvalue()
-        if message.startswith("status: nothing-yet\n"):
-            continue
-        try:
-            return subprocess.run(
-                [codex_command, "queue", "--thread", codex_thread, "--message", message], check=False
-            ).returncode
-        except OSError as error:
-            sys.stderr.write(f"scr review --wait: could not execute {codex_command!r}: {error}\n")
-            return 2
 
 
 def _run_wait(run_dir: paths.RunDir, *, timeout: float, out: TextIO, err: TextIO) -> int:

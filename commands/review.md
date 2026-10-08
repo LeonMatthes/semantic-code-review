@@ -103,7 +103,7 @@ scr review --wait <run_id>
 
 Tell the user in one sentence that the viewer is open and you are listening. Then carry on with whatever else they ask; you do not need to sit idle.
 
-`--wait` blocks for up to 540 seconds (under the Bash tool's cap) and prints one of three outcomes. **The first stdout line names the outcome** — never infer it from the prose:
+`--wait` blocks for up to 1800 seconds (30 minutes; override with `--wait-timeout`) and prints one of three outcomes. **The first stdout line names the outcome** — never infer it from the prose:
 
 | First line | Meaning | Exit |
 |---|---|---|
@@ -167,7 +167,7 @@ The review is over: the tab has been closed for the idle period, or the server w
 
 ## Heads up
 
-- **`scr review` returns at once; `scr review --wait` is what blocks**, for up to 540 s per call, and only in the background. Never run `--wait` in the foreground as a way to "wait for the reviewer".
+- **`scr review` returns at once; `scr review --wait` is what blocks**, for up to 1800 s per call, and only in the background. Never run `--wait` in the foreground as a way to "wait for the reviewer".
 - If the viewer misbehaves after scr was upgraded (a request 404s, a feature is missing), the server is still running the old build: `scr runs restart <run_id>`.
 - The reviewer can send at any time, including while you are working on an earlier batch. A batch landing is a background task completing; handle it at the next reasonable moment.
 - `/scr:review` is user-triggered. Don't call `scr review` pre-emptively from other slash commands or conversations.
